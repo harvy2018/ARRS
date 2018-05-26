@@ -1,0 +1,193 @@
+/***************************************************************************************
+File name: log.c
+Date: 2016-10-25
+Author: Guoku Yan
+Description:
+     This file intends to buffer the important log and statistic info and upload to upstreamer.
+***************************************************************************************/
+#include "time.h"
+#include "log.h"
+#include "flashMgr.h"
+#include "board.h"
+#include "plcMessager.h"
+#include "18b20.h"
+#include "uartPort.h"
+#include "localTime.h"
+#include "fwVersion.h"
+#include "taxControlInterface.h"
+
+static unsigned char  logBuf[REMOTE_LOG_SIZE];
+
+/**************************************************************************************
+Function name: collectLogInfo
+Description:
+    This funciton collect the important log information to static inernal buffer.
+Parameter:
+    NULL
+Return:
+    E_SUCCESS always.
+**************************************************************************************/
+static errorCode  collectLogInfo()
+{
+    int size=0;
+    unsigned char *pChar;
+    unsigned int    *pWord;
+    UartPortState *pUartPortState;
+    FlashSectionStruct *pFS;
+    unsigned char t[64];
+    int i,j;
+    struct tm *time;
+    int sInt,sDec;
+    unsigned char tSym,tInt;
+    unsigned short tDec;
+    unsigned int  secTick;
+    TaxControlDevManager *pTaxControlDevMgr = getTaxControlDevManager();
+    FLASHOperationErrorStatistic *pflashErrorStatisc = getFlashErrorStatistic();
+    
+    // 1st clear the buffer
+    memset(logBuf,0, REMOTE_LOG_SIZE);
+
+    // Release date and Revision
+    pChar=getFwVersion();
+    sprintf(logBuf,"\r\n*FW Ver @%s %s Rev:%d.%d.%d.%d\r\n", __DATE__,__TIME__,pChar[0],pChar[1],pChar[2],pChar[3]);						 				 
+
+    // UART port Connecting/Binding state
+    pUartPortState = uartGetPortState();
+    memset(t,0,64);
+    sprintf(t, "*UART0 State C:%d B:%d UART1 State C:%d B:%d\r\n",pUartPortState[0].cState,pUartPortState[0].bState,pUartPortState[1].cState,pUartPortState[1].bState);
+    strcat(logBuf,t);    
+
+    // PingPong working space selector
+    memset(t,0,64);
+    if(getPingPongFlag())
+    {
+        sprintf(t,"*WS:PiNG!\r\n");
+        strcat(logBuf,t);
+    }
+    else
+    {
+        sprintf(t,"*WS:PoNG!\r\n");
+        strcat(logBuf,t);
+    }
+
+    // Un-uploaded reocord number
+    memset(t,0,64);
+    pFS = uf_RetrieveFlashSectionInfo(FLASH_SECTION_GASOLINE_DATA);
+    if(pFS->wptr >= pFS->rptr)
+		{
+				i=pFS->wptr - pFS->rptr;
+		}
+    else
+		{
+				i = pFS->wptr+pFS->size - pFS->rptr;
+		}
+
+    i= i/64;
+    sprintf(t,"*Unupload:%d Wptr=%x rptr=%x end=%x\r\n",i,pFS->wptr,pFS->rptr, pFS->base+pFS->size);
+    strcat(logBuf,t);
+    
+        
+    // PANID and TX Mode
+    memset(t,0,64);
+    sprintf(t,"*PID:%d  TM:%d\r\n",PANID,plcGetModulationMode());
+    strcat(logBuf,t);
+
+    // Date-Time-HWID-SNR-Temperature
+    secTick = getLocalTick()+LOCAL_TIME_ZONE_SECOND_OFFSET;
+    time= localtime((time_t *)&secTick);
+    memset(t,0,64);
+    sprintf(t,"*Date %4d-%02d-%02d %02d:%02d:%02d ",time->tm_year+1900,time->tm_mon+1,time->tm_mday,
+					                                          time->tm_hour,time->tm_min,time->tm_sec);
+    strcat(logBuf,t);
+
+    memset(t,0,64);
+    pWord= (unsigned int *)getBoardSerialID();
+    sprintf(t,"HWID:%08X %08X %08X ",__REV(pWord[0]),__REV(pWord[1]),__REV(pWord[2]));	
+    strcat(logBuf,t);
+
+    memset(t,0,64);
+    plcGetLatestSNR(&sInt, &sDec);
+    sprintf(t,"SNR:%02d.%02ddB ",sInt,sDec);
+    strcat(logBuf,t);
+    
+    memset(t,0,64);
+    getBoardTemperature(&tSym, &tInt, &tDec);
+
+    if(tSym==0)
+        {
+            sprintf(t,"T:%d.%d\r\n",tInt,tDec);
+        }
+    else
+        {
+            sprintf(t,"T:-%d.%d\r\n",tInt,tDec);
+        }
+    strcat(logBuf,t);
+
+
+    // TaxControl Statistic
+    for(i=0;i<TAX_CONTROL_DEVICE_MAX_NUM;i++)
+        {
+            if(pTaxControlDevMgr->taxControlDevInfo[i].bind == TAX_CONTROL_DEVICE_BOUND)
+                {
+                    for(j=0;j<pTaxControlDevMgr->taxControlDevInfo[i].gunTotal;j++)
+                        {
+                            memset(t,0,64);
+                            sprintf(t,"*PORT:%d Gun:%d Try:%08x Got:%08x\r\n",pTaxControlDevMgr->taxControlDevInfo[i].port,j,
+                                                                                                        pTaxControlDevMgr->taxControlDevInfo[i].statistic[i].totalTryCount,
+                                                                                                        pTaxControlDevMgr->taxControlDevInfo[i].statistic[i].successCount);
+                            strcat(logBuf,t);
+                        }                    
+                }
+        }
+
+    // Flash error statistic
+    for(i=0;i<FLASH_MAX;i++)
+        {
+            memset(t,0,64);
+            sprintf(t, "*FLASH%d:EE:%08x WE:%08x\r\n",i,pflashErrorStatisc[i].eraseCount,pflashErrorStatisc[i].writeCount);
+            strcat(logBuf,t);
+        }
+
+    
+    memset(t,0,64);
+    sprintf(t,"*Log size ~=%d\r\n",strlen(logBuf)+20);
+    strcat(logBuf,t); 
+
+    SEGGER_RTT_WriteString(0,logBuf);       
+    
+}
+
+
+void logTask()
+{
+    collectLogInfo();    
+}
+
+unsigned char *logGetBuffer()
+{
+    return logBuf;
+}
+
+void PrintfLogo(void)
+{	
+	
+	 unsigned char *FW_VER;
+     unsigned int *HW_ID;
+
+    FW_VER = getFwVersion();
+    HW_ID= (unsigned int *)getBoardSerialID();
+   
+	
+	SEGGER_RTT_printf(0,"*************************************************************\r\n");
+	SEGGER_RTT_printf(0,"* Release Date : %s %s\r\n", __DATE__,__TIME__);	
+	SEGGER_RTT_printf(0,"* FW Rev: %d.%d.%d.%d\r\n", FW_VER[0],FW_VER[1],FW_VER[2],FW_VER[3]);	
+	if(getPingPongFlag())
+	  SEGGER_RTT_printf(0,"* TX_Modulation: %d, PanId: %d, PiNG!\r\n",plcGetModulationMode(),PANID);	
+	else
+		SEGGER_RTT_printf(0,"* TX_Modulation: %d, PanId: %d, PoNG!\r\n",plcGetModulationMode(),PANID);
+	
+	SEGGER_RTT_printf(0,"* HW ID: %08X %08X %08X %08X \r\n",__REV(HW_ID[0]),__REV(HW_ID[1]),__REV(HW_ID[2]),__REV(HW_ID[3]));	
+	SEGGER_RTT_printf(0,"*************************************************************\r\n");
+
+	
+}

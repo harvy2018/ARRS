@@ -1,0 +1,100 @@
+/***************************************************************************************
+File name: meterMessager.h
+Date: 2016-11-11
+Author: Guoku Yan
+Description:
+     This file contains  all the definition and API prototype for meterMessager.c
+***************************************************************************************/
+#ifndef _METER_MESSAGE_H
+#define _METER_MESSAGE_H
+
+#define METER_MSG_PREAMBLE  "dx"
+
+
+#define  METER_MSG_STATUS               0x1b
+#define  METER_MSG_RESPONSE           0x2e  
+#define  METER_MSG_TRANSACTION     0x5c
+
+#define  METER_MSG_MAX_LEN             64
+
+#define  METER_PORT1    0
+#define  METER_PORT2    1 
+
+typedef enum  _GunWorkingState
+{
+    GUN_STATE_PUT=0,    // 挂枪
+    GUN_STATE_PICK,      // 摘枪 
+    GUN_STATE_MAX
+}GunWorkingState;
+
+typedef enum _MeterMessageRcvState
+{
+    METER_MSG_RCV_EMPTY,
+    METER_MSG_RCV_PREHEAD,
+    METER_MSG_RCV_POSTHEAD,
+    METER_MSG_RCV_COMPLETE,
+    METER_MSG_RCV_MAX
+}MeterMessageRcvState;
+
+typedef struct _MeterMsgRcvDes
+{
+    unsigned int count;
+    MeterMessageRcvState state;
+    unsigned char msg[METER_MSG_MAX_LEN];
+}MeterMsgRcvDes;
+
+typedef  struct  _MeterGunTransactionMeterDes
+{
+    unsigned int        volume;                 // 油量
+    unsigned int        amount;                 // 金额
+    unsigned short    price;                     // 单价
+    unsigned short    reserved;              // 预留/四字节对齐
+    unsigned int        timeStamp;           // 时间戳
+}MeterGunTransactionMeterDes;
+
+typedef struct _MeterGunTransactionBufferDes
+{
+    unsigned char size;			// 记录个数
+    unsigned char wptr;			// 写指针
+    unsigned char rptr;			// 读指针
+    unsigned char buf;			// 环形记录缓冲区首地址 
+} MeterGunTransactionBufferDes;
+
+typedef struct _MeterDevDes
+{
+    unsigned char port;
+    unsigned char gunTotal;
+    unsigned char gunWorkingState;
+    MeterGunTransactionBufferDes *pGunBufDes;
+} MeterDevDes;
+
+#pragma pack(1)
+typedef struct  _MeterGunStatusMessage
+{
+    unsigned char preamble[2];
+    unsigned char len;
+    unsigned char msg;
+    unsigned char sequenceNo;
+    unsigned char port;
+    unsigned char gunNo;
+    unsigned char gunStatus;
+    unsigned char cc;
+}MeterGunStatusMessage;
+
+
+typedef struct _MeterGunTransactionMessage
+{
+    unsigned char preamble[2];
+    unsigned char len;
+    unsigned char msg;
+    unsigned char sequenceNo;
+    unsigned char port;
+    unsigned char gunNo;
+    unsigned short price;
+    unsigned int    volume;
+    unsigned int    amount;
+    unsigned char cc;
+}MeterGunTransactionMessage;
+
+#endif
+

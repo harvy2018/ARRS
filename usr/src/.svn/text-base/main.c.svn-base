@@ -1,0 +1,115 @@
+/******************************************************************************************************
+Function Name:								Main.c
+Description:
+	This the main entry funciton to sample the gasoline transactions.
+Author: DXYS
+Date: 2016-8-31
+******************************************************************************************************/
+#include "SEGGER_RTT.h"
+#include "errorCode.h"
+#include "uartPort.h"
+#include "taxControlInterface.h"
+#include "version.h"
+#include "board.h"
+#include "18b20.h"
+#include "plcMessager.h"
+#include "gasolineTransferProtocol.h"
+#include "localTime.h"
+#include "fwVersion.h"
+#include "log.h"
+#include "gasolineDataStore_Retrieve.h"
+#include "flashMgr.h"
+
+#define  dbgPrintf  SEGGER_RTT_printf
+
+extern void debugCmdHandler();
+
+void main()
+{
+    static int count100ms=0;
+
+   // dbgPrintf(0,"------Enter into main() @ %d------\r\n",getSysTick());
+      
+    initBoard();   
+    retrievePingPongFlag();
+    PrintfLogo();
+
+    flashVersionCheck();
+    
+   // dbgPrintf(0,"------ Complete Board Initialization at %d! ------\r\n",getSysTick());
+	
+    uartBufferInitialize();
+   // dbgPrintf(0,"------ Complete UART port Initialization at %d! ------\r\n",getSysTick());
+	
+    // 1st time detect the connection status of uart ports
+    uartConnectionDetect(uartGetPortState());
+  //  dbgPrintf(0,"------ Complete bootup UART connection detection at %d! ------\r\n",getSysTick());
+	
+    // Retrieve the taxcontroldevice history record
+    retrieveTotalHistoryRecord();
+    storeRetrieveTaxInfoIndexIntialize();
+   // dbgPrintf(0,"------ Complete Retrieve history data from flash at %d! ------\r\n",getSysTick());
+
+    // Do rebinding based on the history record.
+    taxControlDevToPortBinding(TAX_CONTROL_DEV_BINDING_REQ_TOTAL);
+    
+    dbgPrintf(0,"------Binding Finished Elapse: %dms------\r\n",getSysTick());  
+   // dbgPrintf(0,"------ Complete UART port to tax control device binding at %d! ------\r\n",getSysTick());
+
+    // Install callback funciton for upstreamer's message handling
+    gasolineTrasferAppProtocolInitialize();
+
+    // Retrieve the previous store transaction records
+    storeRetrieveIndexIntialize();
+    plcRetrieveModulationMode();
+  
+    dbgPrintf(0,"------Enter into task loop,Init Elapse: %dms------\r\n",getSysTick());  
+   
+     
+    while(1)
+    {
+        if(getSysTick() % 100 == 0) // 100ms based tasks
+        {
+                count100ms++;
+                
+                // Build connection w/ concentrator via PLC linkage and handle concentrator's message
+                plcMessagerTask();
+
+                // 500ms tick based tasks
+                if(count100ms % 5 == 0)
+                {
+                    // Upload sampled transaction record and/or heartbeat info to concentrator
+                    gasolineAppUploadingTask();                            
+                }
+
+                // 1000ms tick based tasks
+                if(count100ms % 10 == 0)       // 1s Based task scheduler
+                {                    
+                    // Sampling board temperature periodically
+                    sampleBoardTempertureTask();
+
+                    // Periodically sample the gasoline transactions from tax cotrol device
+                    taxControlSamplingTask();
+
+                    // uartPort connection detecting and do rebinding if necessary
+                    taxPortConnectingDetectAndRebindTask();
+                }
+                
+                if(count100ms % 300 == 0)       // 60s Based task scheduler
+                {                 
+                    TaxMonthSamplingTask();
+                }
+
+                 // Processing debug command if have
+                debugCmdHandler();
+
+                bsp_DelayMS(1);     // Consume at least 1mS to avoid retenry this loop infinitely
+        }
+        else
+        {
+                ;//Nothing to do here right now
+        }
+        
+   }
+}
+

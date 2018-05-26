@@ -1,0 +1,59 @@
+/***************************************************************************************
+File name: meterMessager.c
+Date: 2016-11-11
+Author: Guoku Yan
+Description:
+     This file contain all the interface for meter monitoring port to get transaction record and  "pick gun" event  and
+"put gun" event, trigger tax control device to do controlled sampling,etc..
+***************************************************************************************/
+#include "uartPort.h"
+#include "meterMessage.h"
+
+static MeterMsgRcvDes   meterMsgRcvDes[2];
+
+MeterMessageRcvState meterMessagerRetriever(unsigned char port, unsigned char *pMsg)
+{
+    unsigned short  availBytes=0;
+    MeterMsgRcvDes *pMsgRcvDes = meterMsgRcvDes;
+    unsigned char preamble[2];
+    
+    availBytes = uartGetAvailBufferedDataNum(port+UART_METER_PORT_BASE);
+
+    switch(pMsgRcvDes[port].state)
+        {
+            case    METER_MSG_RCV_EMPTY:
+                {
+                    if(availBytes >=3 )
+                        {
+                            uartRead(port+UART_METER_PORT_BASE,preamble,2);
+                            if((preamble[0] == 'd') && (preamble[1] == 'x'))
+                                {
+                                }
+                        }
+                    else
+                        {
+                            return  METER_MSG_RCV_EMPTY; 
+                        }
+                }
+            break;
+
+            case   METER_MSG_RCV_PREHEAD:
+                {
+                }
+            break;
+
+            case   METER_MSG_RCV_POSTHEAD:
+                {
+                }
+            break;
+
+            case   METER_MSG_RCV_COMPLETE:
+                {
+                }
+            break;
+
+            default:
+            break;    
+        }
+}
+

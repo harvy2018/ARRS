@@ -1,0 +1,9 @@
+---- initControlPortSetManager Matches (9 in 4 files) ----
+controlledTaxSampling.c (usr\src):errorCode    initControlPortSetManager()
+controlledTaxSampling.h (usr\inc):errorCode   initControlPortSetManager();
+gasolineTransactionSampling.htm (project\objects):<LI><a href="#[132]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;initControlPortSetManager
+gasolineTransactionSampling.htm (project\objects):<BR><BR>[Called By]<UL><LI><a href="#[132]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;initControlPortSetManager
+gasolineTransactionSampling.htm (project\objects):<P><STRONG><a name="[132]"></a>initControlPortSetManager</STRONG> (Thumb, 156 bytes, Stack size 24 bytes, controlledtaxsampling.o(i.initControlPortSetManager))
+gasolineTransactionSampling.htm (project\objects):<BR><BR>[Stack]<UL><LI>Max Depth = 24<LI>Call Chain = initControlPortSetManager
+gasolineTransactionSampling.htm (project\objects):<LI><a href="#[132]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;initControlPortSetManager
+taxControlInterface.c (usr\src):    initControlPortSetManager();

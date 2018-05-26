@@ -1,0 +1,21 @@
+/***************************************************************************************
+File name: board.c
+Date: 2016-9-7
+Author: George Yan
+Description:
+     This file define all the interface to initialize the board
+***************************************************************************************/
+#ifndef _INIT_BOARD
+#define  _INIT_BOARD
+
+#define CPU_SERIAL_ID_SIZE  12
+
+#define PLC_PWR_ON    GPIO_SetBits(GPIOA, GPIO_Pin_12);	
+#define PLC_PWR_OFF   GPIO_ResetBits(GPIOA, GPIO_Pin_12);	
+
+void initBoard();
+unsigned char *getBoardSerialID();
+void retrievePingPongFlag();
+unsigned char getPingPongFlag();
+
+#endif

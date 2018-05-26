@@ -1,0 +1,749 @@
+/***************************************************************************************
+File name: gasolineDataStore_Retrieve.c
+Date: 2016-9-23
+Author: Wangwei/GuokuYan
+Description:
+     This file contain all the interface to store data/info to flash and retrieve them from flash, this is helper components. 
+***************************************************************************************/
+#include "errorCode.h"
+#include "gasolineDataStore_Retrieve.h"
+#include "flashMgr.h"
+#include "taxControlInterface.h"
+#include "time.h"
+#include "localTime.h"
+
+#define dbgPrintf   SEGGER_RTT_printf
+
+static TaxHistoryTotalRecordInfo taxHistoryTotalRecordInfo[TAX_CONTROL_MACHINE_GUNNO_MAX];
+TaxControlDevMSDFlagManager taxControlDevMSDFlagManager;
+/**********************************************************************************************
+Function Name: retrieveTotalHistoryRecord
+Description:
+    Initialize hisory "total" flash section for each gun. 
+Parameter:
+    NULL
+Return:
+    NULL
+**********************************************************************************************/
+errorCode retrieveTotalHistoryRecord()
+{
+    int i,j;
+    unsigned char magic[4];
+    unsigned char pBuf[TAX_CONTROL_DEVICE_HISTORY_INDEX_SPACE_SIZE];
+    unsigned int addr;
+    FlashSectionStruct *pFS;
+    TaxHistoryTotalRecordInfo *pTaxHistoryTotalRecordInfo = taxHistoryTotalRecordInfo;
+    
+    pFS = uf_RetrieveFlashSectionInfo(FLASH_SECTION_TAXCONTROL_HISTORY);
+
+    addr = pFS->base;
+    // if the flash sector for each gun(as maxium as 16 guns) not initialized, initialize them here.
+    for(i=0;i<TAX_CONTROL_MACHINE_GUNNO_MAX;i++)
+		{
+				// first of all, read the magic # at the beginning of each sector.
+				uf_ReadBuffer(pFS->type, magic,addr,4);
+				if(memcmp(magic,TAX_CONTROL_DEVICE_HISTORY_INDEX_SPACE_MAGIC,4))
+				{   // magic number is not correct, need initialize it
+				    uf_EraseSector(pFS->type, addr);    // erase the whole sector
+				    uf_WriteBuffer(pFS->type,TAX_CONTROL_DEVICE_HISTORY_INDEX_SPACE_MAGIC,addr,4);  // write the magic #
+				    pTaxHistoryTotalRecordInfo[i].index = 3;    // valid index:[4,63],0 means empty // initialize the index to invalid
+				    pTaxHistoryTotalRecordInfo[i].valid = TAX_CONTROL_HISTORY_RECORD_INVALID;   // invalid flag
+				    dbgPrintf(0,"totalHistoryRecordRetrieve: Gun %d total space not initialized, erase and initialize\r\n",i);
+				}
+				else    // Already initialized, need serach the the lastest index
+				{                    
+						uf_ReadBuffer(pFS->type, pBuf, addr,TAX_CONTROL_DEVICE_HISTORY_INDEX_SPACE_SIZE-4);
+						for(j=4;j<TAX_CONTROL_DEVICE_HISTORY_INDEX_SPACE_SIZE;j++)
+						{
+								if(pBuf[j] == FRESH)
+								{
+										if(j==4)    // initialized, but empty, so still invalid
+										{
+												pTaxHistoryTotalRecordInfo[i].index= 3;
+												pTaxHistoryTotalRecordInfo[i].valid = TAX_CONTROL_HISTORY_RECORD_INVALID;
+												dbgPrintf(0,"totalHistoryRecordRetrieve: Gun %d total space initialized but empty\r\n",i);
+										}
+										else
+										{         // initialized, not empty
+												if(pBuf[j-1] == DONE)
+												{
+														TaxHistoryTotalRecord *pTaxHistoryTotalRecord;
+                                                                                                  unsigned char tt[11]={0};  
+														pTaxHistoryTotalRecordInfo[i].index = j-1;     // this is the latest record index
+														
+														// Read the record out of flash
+														uf_ReadBuffer(pFS->type, pBuf,addr+pTaxHistoryTotalRecordInfo[i].index*sizeof(TaxHistoryTotalRecord) ,sizeof(TaxHistoryTotalRecord));
+														
+														pTaxHistoryTotalRecord = (TaxHistoryTotalRecord *)pBuf;
+
+														pTaxHistoryTotalRecordInfo[i].record.gunNo = pTaxHistoryTotalRecord->gunNo;
+														pTaxHistoryTotalRecordInfo[i].record.portNo = pTaxHistoryTotalRecord->portNo;
+														pTaxHistoryTotalRecordInfo[i].record.initLevel = pTaxHistoryTotalRecord->initLevel;
+														pTaxHistoryTotalRecordInfo[i].record.totalAmount = pTaxHistoryTotalRecord->totalAmount;
+														pTaxHistoryTotalRecordInfo[i].record.totalVolume = pTaxHistoryTotalRecord->totalVolume;
+														memcpy(pTaxHistoryTotalRecordInfo[i].record.serialID,pTaxHistoryTotalRecord->serialID,10);
+														memcpy(pTaxHistoryTotalRecordInfo[i].record.taxUniqueID,pTaxHistoryTotalRecord->taxUniqueID,20);
+
+														pTaxHistoryTotalRecordInfo[i].valid = TAX_CONTROL_HISTORY_RECORD_VALID;
+
+                                                                                                  memcpy(tt,pTaxHistoryTotalRecordInfo[i].record.serialID,10);
+
+														dbgPrintf(0,"totalHistoryRecordRetrieve:Gun %d total space found valid index at %d\r\n",i,j-1);
+                                                                                                  dbgPrintf(0,"totalHistoryRecordRetrieve:SerialID:%s\r\n",tt);  
+                                                                                                  dbgPrintf(0,"totalHistoryRecordRetrieve: TotalVolume:%lld\r\n",pTaxHistoryTotalRecord->totalVolume);
+                                                                                                  dbgPrintf(0,"totalHistoryRecordRetrieve: TotalAmount:%lld\r\n",pTaxHistoryTotalRecord->totalAmount);
+												}   
+												else
+												{
+														pTaxHistoryTotalRecordInfo[i].index = j;
+														pTaxHistoryTotalRecordInfo[i].valid = TAX_CONTROL_HISTORY_RECORD_INVALID;
+														dbgPrintf(0,"totalHistoryRecordRetrieve:Gun %d total space found invalid index, drop and recover\r\n",i);
+												}   
+										}
+										break;
+								}                               
+						}
+                        
+                        if(j == TAX_CONTROL_DEVICE_HISTORY_INDEX_SPACE_SIZE)
+                            {
+                                uf_EraseSector(pFS->type, addr);
+                                uf_WriteBuffer(pFS->type,TAX_CONTROL_DEVICE_HISTORY_INDEX_SPACE_MAGIC,addr,4);
+                                pTaxHistoryTotalRecordInfo[i].index = 3;    // valid index:[4,63],0 means empty
+                                pTaxHistoryTotalRecordInfo[i].valid = TAX_CONTROL_HISTORY_RECORD_INVALID;
+                                dbgPrintf(0,"totalHistoryRecordRetrieve:Gun %d total space full, reinitialize it\r\n",i);
+                            }
+			 }
+				bsp_DelayMS(10);
+				addr += FLASH_SECTOR_SIZE;
+			 
+		}
+    return E_SUCCESS;    
+}
+/***********************************************************************************************
+Function Name: storeTotalHistoryRecord
+Description:
+    Store an Total sample record into flash as per gun(total 8 guns supported)
+Parameters:
+    port: [I], current uart port #
+    gun: [I], current gun # of tax control device
+    gunBaseBo:[I], Current tax control device start gun No offset.
+    volume:[I], current total volume
+    amount:[I], current total amount
+    pSerialID:[I], current tax control unique ID
+    pTaxID:[I], current gasoline station unique ID
+Return:
+    E_SUCCESS: always return successfully.
+************************************************************************************************/
+errorCode storeTotalHistoryRecord(unsigned char port,unsigned char gun,unsigned char gunBaseNo,
+										   long long volume, long long amount,
+										   unsigned char *pSerialId,unsigned char *pTaxId)
+{
+    unsigned int index;
+    unsigned int gunSpaceStartAddr;
+    unsigned int addr;
+    FlashSectionStruct *pFS;
+    unsigned char mark;
+    TaxHistoryTotalRecordInfo *pTaxHistoryTotalRecordInfo = taxHistoryTotalRecordInfo;
+
+    pFS = uf_RetrieveFlashSectionInfo(FLASH_SECTION_TAXCONTROL_HISTORY);
+
+    gunSpaceStartAddr = pFS->base + (gun+gunBaseNo) * FLASH_SECTOR_SIZE;
+    pTaxHistoryTotalRecordInfo[gun+gunBaseNo].index++;
+    if(pTaxHistoryTotalRecordInfo[gun+gunBaseNo].index>= 60)
+        {
+            uf_EraseSector(pFS->type, gunSpaceStartAddr);
+            uf_WriteBuffer(pFS->type,TAX_CONTROL_DEVICE_HISTORY_INDEX_SPACE_MAGIC,gunSpaceStartAddr,4);
+            pTaxHistoryTotalRecordInfo[gun+gunBaseNo].index=4;  
+      }
+
+    addr = gunSpaceStartAddr +  pTaxHistoryTotalRecordInfo[gun+gunBaseNo].index * sizeof(TaxHistoryTotalRecord);
+    
+    // Assign value to structure
+
+    pTaxHistoryTotalRecordInfo[gun+gunBaseNo].record.gunNo = gun;
+    pTaxHistoryTotalRecordInfo[gun+gunBaseNo].record.portNo = port;
+    pTaxHistoryTotalRecordInfo[gun+gunBaseNo].record.initLevel = 0;
+    memcpy(pTaxHistoryTotalRecordInfo[gun+gunBaseNo].record.serialID,pSerialId,10);
+    memcpy(pTaxHistoryTotalRecordInfo[gun+gunBaseNo].record.taxUniqueID,pTaxId,20);
+    pTaxHistoryTotalRecordInfo[gun+gunBaseNo].record.totalAmount = amount;
+    pTaxHistoryTotalRecordInfo[gun+gunBaseNo].record.totalVolume = volume;
+
+
+    // 1st of all, write dirty
+    mark = DIRTY;
+    uf_WriteBuffer(pFS->type,&mark, gunSpaceStartAddr+pTaxHistoryTotalRecordInfo[gun+gunBaseNo].index,1);
+
+    // 2nd, write the content
+    uf_WriteBuffer(pFS->type, (u8 *)&pTaxHistoryTotalRecordInfo[gun+gunBaseNo].record, addr, sizeof(TaxHistoryTotalRecord));
+
+    // 3rd, write done
+    mark = DONE;
+    uf_WriteBuffer(pFS->type, &mark, gunSpaceStartAddr+pTaxHistoryTotalRecordInfo[gun+gunBaseNo].index, 1);
+
+
+    dbgPrintf(0,"storeTotalHistoryRecord: gun:%d  port:%d gunOrder:%d @%x\r\n",gun,port,gun+gunBaseNo,addr);
+    dbgPrintf(0,"storeTotalHistoryRecord: totalVol:%lld\r\n",volume);
+    dbgPrintf(0,"storeTotalHistoryRecord: totalAmount:%lld\r\n",amount);
+    
+    return E_SUCCESS;
+}
+/****************************************************************************************************
+Function Name: storeRetrieveIndexIntialize
+Description:
+	This function intends to initialize the flash space for store/retrieve the tax transaction record. After this call, the next wptr for 
+stroing a new reocrd and the next rptr for retrieveing a record to upload are positioned.
+Parameter:
+	NULL
+Return:
+	NULL
+*****************************************************************************************************/
+errorCode   storeRetrieveIndexIntialize()
+{
+    u32 i,k;
+    u32 spaceSize,spaceStartAddr,spaceEndAddr,spaceSectorNum;
+    FLASH_TYPE type;
+    u8  c[2];
+    u32 addr;
+
+    FlashSectionStruct *pFS = uf_RetrieveFlashSectionInfo(FLASH_SECTION_GASOLINE_DATA);
+    spaceStartAddr = pFS->base;
+    spaceSize = pFS->size;
+    spaceEndAddr = spaceStartAddr + spaceSize;
+    spaceSectorNum = pFS->size >> 12;
+    type = pFS->type;
+
+
+    // 1st initialized the wptr and  rptr to the start address of the space
+    pFS->wptr = spaceStartAddr;
+
+    // Then look for next address to store the new record
+    addr= spaceStartAddr;
+    while(addr < spaceEndAddr)
+        {
+            uf_ReadBuffer(type, c, addr , 2);
+            if((c[0] == FRESH) && (c[1] == FRESH))      // we must lookfor where mark=fresh and type = fresh to write next new record
+                {
+                    pFS->wptr = addr;
+                    break;
+                }
+            addr= addr + sizeof(TaxOnceTransactionRecord);
+        }
+
+    // Till the end of the space, still not found the proper address, may need erase the 1st sector
+    if(addr == spaceEndAddr)
+        {
+            // readback the last record of the 1st sector, if the mark == done indicates the sector is useless and can be erased
+            uf_ReadBuffer(type,c, spaceStartAddr + FLASH_SECTOR_SIZE - sizeof(TaxOnceTransactionRecord),1);
+            if(c[0] == DONE)
+                {                    
+                    uf_EraseSector(type, spaceStartAddr);
+                    pFS->wptr = pFS->base;
+                    dbgPrintf(0,"storeRetrieveIndexIntialize: Erase the 1st sector: 1\r\n");
+                }
+            else
+                {
+                    dbgPrintf(0,"!!!!storeRetrieveIndexIntialize: Fatal error 1\r\n");// TODO: fata error since no empty space
+                }
+        }
+        
+    // 1st initilize rptr to wptr
+    pFS->rptr = pFS->wptr;
+
+    // then look for where mark = dirty
+    addr= spaceStartAddr;
+    while(addr < spaceEndAddr - sizeof(TaxOnceTransactionRecord))
+        {
+            uf_ReadBuffer(type, c, addr, 1);
+            if(c[0] == DIRTY)
+                {
+                    pFS->rptr = addr;
+                    break;
+                }
+            addr = addr + sizeof(TaxOnceTransactionRecord);
+        }
+
+    dbgPrintf(0,"storeRetrieveIndexIntialize: wptr=%x  rptr=%x\r\n",pFS->wptr,pFS->rptr);
+
+    return E_SUCCESS;    
+}
+/****************************************************************************************************
+Function Name: storeTransactionRecord
+Description:
+	This function intends to stor one gasoline transaction record onto flash.
+Parameter:
+	pRecord:[I/O],pointer of TaxOnceTransactionRecord structure.
+Return:
+	E_SUCCESS: Succeed to store one record.
+	E_NO_MEMORY: flash buffer is full.
+*****************************************************************************************************/
+errorCode   storeTransactionRecord(TaxOnceTransactionRecord *pRecord)
+{
+    FlashSectionStruct *pFS= uf_RetrieveFlashSectionInfo(FLASH_SECTION_GASOLINE_DATA);
+    u8  mark;
+    
+
+    dbgPrintf(0,"storeTransactionRecord: wptr:%x  rptr:%x\r\n",pFS->wptr,pFS->rptr);
+
+    // 1st write the content
+    uf_WriteBuffer(pFS->type, (u8 *)pRecord + 1, pFS->wptr+1, sizeof(TaxOnceTransactionRecord)-1);
+    // The write the "mark"
+    uf_WriteBuffer(pFS->type, (u8 *)pRecord, pFS->wptr, 1);
+
+
+    pFS->wptr += sizeof(TaxOnceTransactionRecord);
+
+    if(pFS->wptr >= (pFS->base+pFS->size))
+        pFS->wptr = pFS->base;
+
+
+    // Judge if wptr is at the beginning of a sector, if yes, need judge whether erase the sector or not
+    if(pFS->wptr % FLASH_SECTOR_SIZE == 0 )
+    {
+        uf_ReadBuffer(pFS->type, &mark, pFS->wptr, 1);
+        if(mark != FRESH)
+        {
+            u8   lastMark;
+            uf_ReadBuffer(pFS->type, &lastMark,pFS->wptr+FLASH_SECTOR_SIZE - sizeof(TaxOnceTransactionRecord),1);
+            if(lastMark == DONE)
+            {
+                uf_EraseSector(pFS->type, pFS->wptr);
+                dbgPrintf(0,"storeTransactionRecord:Erase the next sector: %x\r\n",pFS->wptr);
+            }
+            else
+            {
+                dbgPrintf(0,"storeTransactionRecord:!!!! No free space\r\n");
+                return E_NO_MEMORY;
+            }    
+        }
+    }
+    return E_SUCCESS;
+}
+/****************************************************************************************************
+Function Name: retrieveTransactionRecord
+Description:
+	This function intends to readback one gasoline transaction record from flash.
+Parameter:
+	pRecord:[I/O],pointer of TaxOnceTransactionRecord structure.
+Return:
+	E_SUCCESS: Succeed to retrieve one record.
+	E_EMPTY: no vaild record.
+*****************************************************************************************************/
+errorCode  retrieveTransactionRecord(TaxOnceTransactionRecord *pRecord)
+{
+    FlashSectionStruct *pFS= uf_RetrieveFlashSectionInfo(FLASH_SECTION_GASOLINE_DATA);
+
+    while(pFS->rptr != pFS->wptr)
+        {
+            uf_ReadBuffer(pFS->type, (u8 *)pRecord, pFS->rptr, sizeof(TaxOnceTransactionRecord));
+            if(pRecord->head.mark == DIRTY) // Normally, this is the case
+                {
+                    dbgPrintf(0,"retrieveTransactionRecord: Successfully retrieve a transaction record @ %x\r\n",pFS->rptr);
+                    return E_SUCCESS;
+                }   
+            else        // This is the abnormal case means "mark" was not programmed then somehing abnormal occured
+                {
+                    pFS->rptr += sizeof(TaxOnceTransactionRecord);
+                    if(pFS->rptr >= pFS->base + pFS->size)
+                        pFS->rptr = pFS->base;
+                }
+        }   
+
+    return E_EMPTY;
+
+}
+/****************************************************************************************************
+Function Name: retrieveTaxMonthDataRecord
+Description:
+	This function intends to readback one gasoline transaction _month_total_record from flash.
+Parameter:
+	pRecord:[I/O],pointer of TaxMonthDataRecord structure.
+Return:
+	E_SUCCESS: Succeed to retrieve one record.
+	E_EMPTY: no vaild record.
+*****************************************************************************************************/
+errorCode  retrieveTaxMonthDataRecord(TaxMonthDataRecord *pRecord)
+{
+	FlashSectionStruct *pFS= uf_RetrieveFlashSectionInfo(FLASH_SECTION_MSD_DATA);
+	while(pFS->rptr != pFS->wptr)
+		{
+			uf_ReadBuffer(pFS->type, (u8 *)pRecord, pFS->rptr, sizeof(TaxMonthDataRecord));
+			if(pRecord->head.mark == DIRTY) // Normally, this is the case
+				{
+					dbgPrintf(0,"retrieveTaxMonthDataRecord: Successfully retrieve a record @ %x\r\n",pFS->rptr);
+					return E_SUCCESS;
+				}
+			else        // This is the abnormal case means "mark" was not programmed then somehing abnormal occured
+				{
+					pFS->rptr += sizeof(TaxMonthDataRecord);
+					if(pFS->rptr >= pFS->base + pFS->size)
+						pFS->rptr = pFS->base;
+				}
+		}
+	return E_EMPTY;
+}
+/****************************************************************************************************
+Function Name: retrieveTransactionRecordReadPointer
+Description:
+	This function intends to mark the current single_record which poined by rptr as "DONE".
+Parameter:
+	NULL.
+Return:
+	E_SUCCESS: Succeed to retrieve one record.
+*****************************************************************************************************/
+errorCode   retrieveTransactionRecordReadPointer()
+{
+    u8 mark = DONE;
+    FlashSectionStruct *pFS= uf_RetrieveFlashSectionInfo(FLASH_SECTION_GASOLINE_DATA);
+    
+    uf_WriteBuffer(pFS->type,&mark,pFS->rptr, 1);
+
+    pFS->rptr +=sizeof(TaxOnceTransactionRecord);
+    if(pFS->rptr >= pFS->base + pFS->size)
+        pFS->rptr = pFS->base;
+
+    dbgPrintf(0,"retrieveTransactionRecordReadPointer: rptr:%x\r\n",pFS->rptr);
+
+    return E_SUCCESS;
+}
+/****************************************************************************************************
+Function Name: retrieveTransactionRecordReadPointer
+Description:
+	This function intends to mark the current month_total_record which poined by rptr as "DONE".
+Parameter:
+	NULL.
+Return:
+	E_SUCCESS: Succeed to retrieve one record.
+*****************************************************************************************************/
+errorCode  retrieveTaxMonthDataRecordReadPointer()
+{
+    u8 mark = DONE;
+    FlashSectionStruct *pFS= uf_RetrieveFlashSectionInfo(FLASH_SECTION_MSD_DATA);
+    
+    uf_WriteBuffer(pFS->type,&mark,pFS->rptr, 1);
+
+    pFS->rptr +=sizeof(TaxMonthDataRecord);
+    if(pFS->rptr >= pFS->base + pFS->size)
+        pFS->rptr = pFS->base;
+
+   dbgPrintf(0,"retrieveTaxMonthDataRecordReadPointer: rptr:%x\r\n",pFS->rptr);
+
+    return E_SUCCESS;
+}
+/****************************************************************************************************
+Function Name: TaxHistoryTotalRecordInfo
+Description:
+    Return the pointer of TaxHistoryTotalRecordInfo;
+Parameter:
+    NULL
+****************************************************************************************************/
+TaxHistoryTotalRecordInfo* getTaxHistoryTotalRecordInfo()
+{
+    return taxHistoryTotalRecordInfo;
+}
+
+/****************************************************************************************************
+Function Name: storeMonthTaxData
+Description:
+	This function intends to stor _month_total gasoline transaction record onto flash.
+Parameter:
+	pRecord:[I/O],pointer of TaxMonthDataRecord structure.
+Return:
+	E_SUCCESS: Succeed to store one record.
+	E_NO_MEMORY: flash buffer is full.
+*****************************************************************************************************/
+errorCode   storeMonthTaxData(TaxMonthDataRecord *pRecord)
+{
+	FlashSectionStruct *pFS= uf_RetrieveFlashSectionInfo(FLASH_SECTION_MSD_DATA);
+	u8  mark;
+	dbgPrintf(0,"storeMonthTaxData: wptr:%x  rptr:%x\r\n",pFS->wptr,pFS->rptr);
+	
+	// 1st write the content
+	uf_WriteBuffer(pFS->type, (u8 *)pRecord + 1, pFS->wptr+1, sizeof(TaxMonthDataRecord)-1);
+	
+	// Then write the "mark"
+	uf_WriteBuffer(pFS->type, (u8 *)pRecord, pFS->wptr, 1);
+	pFS->wptr += sizeof(TaxMonthDataRecord);
+	
+	if(pFS->wptr >= (pFS->base+pFS->size))
+		pFS->wptr = pFS->base;
+	
+	// Judge if wptr is at the beginning of a sector, if yes, need judge whether erase the sector or not
+	if(pFS->wptr % FLASH_SECTOR_SIZE == 0)
+		{
+			uf_ReadBuffer(pFS->type, &mark, pFS->wptr, 1);
+			if(mark != FRESH)
+				{
+					u8   lastMark;
+					uf_ReadBuffer(pFS->type, &lastMark,pFS->wptr+FLASH_SECTOR_SIZE - sizeof(TaxMonthDataRecord),1);
+					if(lastMark == DONE)
+						{
+							uf_EraseSector(pFS->type, pFS->wptr);
+							dbgPrintf(0,"storeMonthTaxData:Erase the next sector: %x\r\n",pFS->wptr);
+						}
+					else
+						{
+							dbgPrintf(0,"storeMonthTaxData:!!!! No free space\r\n");
+							return E_NO_MEMORY;
+						}
+				}
+		}
+	return E_SUCCESS;
+}
+/****************************************************************************************************
+Function Name: RetrieveMonthDataSampleFlag
+Description:
+	This function intends to initialize the flash space for store/retrieve the _month_total tax transaction record. After this call,
+the next wptr for stroing a new reocrd and the next rptr for retrieveing a record to upload are positioned.
+Parameter:
+	NULL
+Return:
+	NULL
+*****************************************************************************************************/
+errorCode RetrieveMonthDataSampleFlag()
+{
+	unsigned char pBuf[20];
+	unsigned char dev;
+	struct tm *t;
+	u32 timestick;
+	
+	timestick=getLocalTick()+LOCAL_TIME_ZONE_SECOND_OFFSET;//补8小时时区
+	t = localtime((time_t *)&timestick);
+	
+	FlashSectionStruct *pFS = uf_RetrieveFlashSectionInfo(FLASH_SECTION_DEVICE_PARAMETER);
+	
+	// Read out magic code from flash
+	uf_ReadBuffer(pFS->type, pBuf, pFS->base, 4);
+	if(!memcmp(pBuf,TAX_CONTROL_DEVICE_MSDSAMPLE_FLAG_FLASH_MAGIC,4))      // Magic code is correct
+    {
+        uf_ReadBuffer(pFS->type,(u8 *)&taxControlDevMSDFlagManager, pFS->base+4, sizeof(taxControlDevMSDFlagManager));
+        for(dev=0;dev<TAX_CONTROL_DEVICE_MAX_NUM;dev++)
+            {
+                dbgPrintf(0,"TaxControl:%d, Month:%d,MSDFlag=%d \r\n",
+                dev,taxControlDevMSDFlagManager.Month,taxControlDevMSDFlagManager.MSDFlag[dev]);
+            }
+    }
+	else
+    {
+        for(dev=0;dev<TAX_CONTROL_DEVICE_MAX_NUM;dev++)
+        {
+            taxControlDevMSDFlagManager.MSDFlag[dev]=TAX_CONTROL_DEVICE_MSDSF_UNDONE;
+        }
+            
+        if(t->tm_mon==0)
+            taxControlDevMSDFlagManager.Month=12;
+        else
+            taxControlDevMSDFlagManager.Month=t->tm_mon;
+         
+              
+      //  memcpy(pBuf,TAX_CONTROL_DEVICE_MSDSAMPLE_FLAG_FLASH_MAGIC,4);
+        memcpy(pBuf,(u8*)&taxControlDevMSDFlagManager,sizeof(taxControlDevMSDFlagManager));
+       
+        uf_EraseSector(pFS->type,pFS->base);     
+        uf_WriteBuffer(pFS->type, pBuf, pFS->base+4, sizeof(taxControlDevMSDFlagManager));
+        uf_WriteBuffer(pFS->type, (u8*)TAX_CONTROL_DEVICE_MSDSAMPLE_FLAG_FLASH_MAGIC, pFS->base,4);
+        
+        
+        dbgPrintf(0,"TaxControl MSDFlag Init Finished!\r\n");
+            
+        for(dev=0;dev<TAX_CONTROL_DEVICE_MAX_NUM;dev++)
+        {
+            dbgPrintf(0,"TaxControl:%d, Month:%d,MSDFlag=%d \r\n",
+            dev,taxControlDevMSDFlagManager.Month,taxControlDevMSDFlagManager.MSDFlag[dev]);
+        }
+    }
+	return E_SUCCESS;
+}
+/*****************************************************************************************************
+Function Name: storeRetrieveTaxInfoIndexIntialize
+Description:
+	This function intends to initialize the flash space for store/retrieve the tax device info record. After this call, the next wptr for 
+stroing a new reocrd and the next rptr for retrieveing a record to upload are positioned.
+
+Parameter:
+	NULL
+Return:
+	NULL
+*****************************************************************************************************/
+errorCode   storeRetrieveTaxInfoIndexIntialize()
+{
+    u32 i,k;
+    u32 spaceSize,spaceStartAddr,spaceEndAddr,spaceSectorNum;
+    FLASH_TYPE type;
+    u8  c[2];
+    u32 addr;
+
+    FlashSectionStruct *pFS = uf_RetrieveFlashSectionInfo(FLASH_SECTION_TAX_INFO);
+    spaceStartAddr = pFS->base;
+    spaceSize = pFS->size;
+    spaceEndAddr = spaceStartAddr + spaceSize;
+    spaceSectorNum = pFS->size >> 12;
+    type = pFS->type;
+
+
+    // 1st initialized the wptr and  rptr to the start address of the space
+    pFS->wptr = spaceStartAddr;
+
+    // Then look for next address to store the new record
+    addr= spaceStartAddr;
+    while(addr < spaceEndAddr)
+        {
+            uf_ReadBuffer(type, c, addr , 2);
+            if((c[0] == FRESH) && (c[1] == FRESH))      // we must lookfor where mark=fresh and type = fresh to write next new record
+                {
+                    pFS->wptr = addr;
+                    break;
+                }
+            addr= addr + sizeof(TaxDevInfo);
+        }
+
+    // Till the end of the space, still not found the proper address, may need erase the 1st sector
+    if(addr == spaceEndAddr)
+    {
+        // readback the last record of the 1st sector, if the mark == done indicates the sector is useless and can be erased
+        uf_ReadBuffer(type,c, spaceStartAddr + FLASH_SECTOR_SIZE - sizeof(TaxDevInfo),1);
+        if(c[0] == DONE)
+        {                    
+            uf_EraseSector(type, spaceStartAddr);
+            pFS->wptr = pFS->base;
+            dbgPrintf(0,"storeRetrieveTaxInfoIndexIntialize: Erase the 1st sector: 1\r\n");
+        }
+        else
+        {
+            dbgPrintf(0,"!!!!storeRetrieveTaxInfoIndexIntialize: Fatal error 1\r\n");
+            // TODO: fata error since no empty space
+        }
+    }
+        
+    // 1st initilize rptr to wptr
+    pFS->rptr = pFS->wptr;
+
+    // then look for where mark = dirty
+    addr= spaceStartAddr;
+    while(addr < spaceEndAddr - sizeof(TaxDevInfo))
+    {
+        uf_ReadBuffer(type, c, addr, 1);
+        if(c[0] == DIRTY)
+        {
+            pFS->rptr = addr;
+            break;
+        }
+        addr = addr + sizeof(TaxDevInfo);
+    }
+
+    dbgPrintf(0,"storeRetrieveTaxInfoIndexIntialize: wptr=%x  rptr=%x\r\n",pFS->wptr,pFS->rptr);
+
+    return E_SUCCESS;    
+}
+/****************************************************************************************************
+Function Name: storeTaxDevInfoRecord
+Description:
+	This function intends to stor one tax device info record to flash.
+Parameter:
+	pRecord:[I/O],pointer of TaxDevInfo structure.
+Return:
+	E_SUCCESS: Succeed to store one record.
+	E_NO_MEMORY: flash buffer is full.
+*****************************************************************************************************/
+errorCode   storeTaxDevInfoRecord(TaxDevInfo *pRecord)
+{
+    FlashSectionStruct *pFS= uf_RetrieveFlashSectionInfo(FLASH_SECTION_TAX_INFO);
+    u8  mark;
+    
+
+    dbgPrintf(0,"storeTaxDevInfoRecord: wptr:%x  rptr:%x\r\n",pFS->wptr,pFS->rptr);
+
+    // 1st write the content
+    uf_WriteBuffer(pFS->type, (u8 *)pRecord + 1, pFS->wptr+1, sizeof(TaxDevInfo)-1);
+    // Then write the "mark"
+    uf_WriteBuffer(pFS->type, (u8 *)pRecord, pFS->wptr, 1);
+
+
+    pFS->wptr += sizeof(TaxDevInfo);
+
+    if(pFS->wptr >= (pFS->base+pFS->size))
+        pFS->wptr = pFS->base;
+
+
+    // Judge if wptr is at the beginning of a sector, if yes, need judge whether erase the sector or not
+    if(pFS->wptr % FLASH_SECTOR_SIZE == 0 )
+    {
+        uf_ReadBuffer(pFS->type, &mark, pFS->wptr, 1);
+        if(mark != FRESH)
+        {
+            u8   lastMark;
+            uf_ReadBuffer(pFS->type, &lastMark,pFS->wptr+FLASH_SECTOR_SIZE - sizeof(TaxDevInfo),1);
+            if(lastMark == DONE)
+            {
+                uf_EraseSector(pFS->type, pFS->wptr);
+                dbgPrintf(0,"storeTaxDevInfoRecord:Erase the next sector: %x\r\n",pFS->wptr);
+            }
+            else
+            {
+                dbgPrintf(0,"storeTaxDevInfoRecord:!!!! No free space\r\n");
+                return E_NO_MEMORY;
+            }    
+        }
+    }
+    return E_SUCCESS;
+}
+
+/****************************************************************************************************
+Function Name: retrieveTaxDevInfoRecord
+Description:
+	This function intends to readback one tax device info record from flash.
+Parameter:
+	pRecord:[I/O],pointer of TaxDevInfo structure.
+Return:
+	E_SUCCESS: Succeed to retrieve one record.
+	E_EMPTY: no vaild record.
+*****************************************************************************************************/
+errorCode  retrieveTaxDevInfoRecord(TaxDevInfo *pRecord)
+{
+    FlashSectionStruct *pFS= uf_RetrieveFlashSectionInfo(FLASH_SECTION_TAX_INFO);
+
+    while(pFS->rptr != pFS->wptr)
+        {
+            uf_ReadBuffer(pFS->type, (u8 *)pRecord, pFS->rptr, sizeof(TaxDevInfo));
+            if(pRecord->head.mark == DIRTY) // Normally, this is the case
+                {
+                    dbgPrintf(0,"retrieveTaxDevInfoRecord: Successfully retrieve a transaction record @ %x\r\n",pFS->rptr);
+                    return E_SUCCESS;
+                }   
+            else        // This is the abnormal case means "mark" was not programmed then somehing abnormal occured
+                {
+                    pFS->rptr += sizeof(TaxDevInfo);
+                    if(pFS->rptr >= pFS->base + pFS->size)
+                        pFS->rptr = pFS->base;
+                }
+        }   
+
+    return E_EMPTY;
+
+}
+
+/****************************************************************************************************
+Function Name: retrieveTaxDevInfoRecordReadPointer
+Description:
+	This function intends to mark the current tax device info record which poined by rptr as "DONE".
+Parameter:
+	NULL.
+Return:
+	E_SUCCESS: Succeed to retrieve one record.
+*****************************************************************************************************/
+errorCode   retrieveTaxDevInfoRecordReadPointer()
+{
+    u8 mark = DONE;
+    FlashSectionStruct *pFS= uf_RetrieveFlashSectionInfo(FLASH_SECTION_TAX_INFO);
+    
+    uf_WriteBuffer(pFS->type,&mark,pFS->rptr, 1);
+
+    pFS->rptr +=sizeof(TaxDevInfo);
+    if(pFS->rptr >= pFS->base + pFS->size)
+        pFS->rptr = pFS->base;
+
+    dbgPrintf(0,"retrieveTaxDevInfoRecordReadPointer: rptr:%x\r\n",pFS->rptr);
+
+    return E_SUCCESS;
+}
+
+

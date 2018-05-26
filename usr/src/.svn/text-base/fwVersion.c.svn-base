@@ -1,0 +1,16 @@
+/***************************************************************************************
+File name: fwVersion.c
+Date: 2016-10-24
+Author: GuokuYan
+Description:
+     This file contain all the firmware version infomation.
+***************************************************************************************/
+unsigned char fw_ver[4]={3,1,0,0};
+
+
+unsigned char *getFwVersion()
+{
+    return fw_ver;
+}
+
+

@@ -1,0 +1,101 @@
+K 25
+svn:wc:ra_dav:version-url
+V 271
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src
+END
+snr.c
+K 25
+svn:wc:ra_dav:version-url
+V 277
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src/snr.c
+END
+flashMgr.c
+K 25
+svn:wc:ra_dav:version-url
+V 282
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src/flashMgr.c
+END
+meterMessager.c
+K 25
+svn:wc:ra_dav:version-url
+V 287
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src/meterMessager.c
+END
+plcMessager.c
+K 25
+svn:wc:ra_dav:version-url
+V 285
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src/plcMessager.c
+END
+swapOrder.c
+K 25
+svn:wc:ra_dav:version-url
+V 283
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src/swapOrder.c
+END
+localTime.c
+K 25
+svn:wc:ra_dav:version-url
+V 283
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src/localTime.c
+END
+gasolineDataStore_Retrieve.c
+K 25
+svn:wc:ra_dav:version-url
+V 300
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src/gasolineDataStore_Retrieve.c
+END
+taxControlInterface.c
+K 25
+svn:wc:ra_dav:version-url
+V 293
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src/taxControlInterface.c
+END
+uartPort.c
+K 25
+svn:wc:ra_dav:version-url
+V 282
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src/uartPort.c
+END
+log.c
+K 25
+svn:wc:ra_dav:version-url
+V 277
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src/log.c
+END
+fwVersion.c
+K 25
+svn:wc:ra_dav:version-url
+V 283
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src/fwVersion.c
+END
+main.c
+K 25
+svn:wc:ra_dav:version-url
+V 278
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src/main.c
+END
+transactionHelper.c
+K 25
+svn:wc:ra_dav:version-url
+V 291
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src/transactionHelper.c
+END
+debug.c
+K 25
+svn:wc:ra_dav:version-url
+V 279
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src/debug.c
+END
+Board.c
+K 25
+svn:wc:ra_dav:version-url
+V 279
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src/Board.c
+END
+gasolineTransferProtocol.c
+K 25
+svn:wc:ra_dav:version-url
+V 298
+/svn/project/!svn/ver/3177/01-%E4%BB%A3%E7%A0%81/06-%E5%89%8D%E7%AB%AF%E9%87%87%E9%9B%86%E5%9B%BA%E4%BB%B6/%E5%8A%A0%E6%B2%B9%E7%AB%99%E9%A1%B9%E7%9B%AE/%E5%8A%A0%E6%B2%B9%E6%9C%BA%E6%95%B0%E6%8D%AE%E9%87%87%E9%9B%86/3.1%E7%89%88%E6%9C%AC/oilStation_V3.1.0.0_Ping/usr/src/gasolineTransferProtocol.c
+END

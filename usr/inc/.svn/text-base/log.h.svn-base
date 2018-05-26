@@ -1,0 +1,16 @@
+/***************************************************************************************
+File name: log.h
+Date: 2016-10-25
+Author: Guoku Yan
+Description:
+     This file defines log related APIs and Marco.
+***************************************************************************************/
+#ifndef _LOG
+#define _LOG
+
+#define REMOTE_LOG_SIZE     1024
+
+unsigned char *logGetBuffer();
+void logTask();
+void PrintfLogo(void);
+#endif

@@ -1,0 +1,429 @@
+/***************************************************************************************
+File name: plcMessager.h
+Date: 2016-9-14
+Author: GuoxiZhang/Wangwei/GuokuYan
+Description:
+     This file contain all the public interface and default definition declaration for the plcMessager.c ,not inlucde the application
+protocal to layer the sofware component.. 
+***************************************************************************************/
+#ifndef __PLCMESSAGE_H_
+#define __PLCMESSAGE_H_
+
+#include    <stdbool.h>
+#include    "dataType.h"
+#include	"errorCode.h"
+
+#define PANID   12355
+#define PLC_MESSAGE_MAXIUM_SIZE     1024
+#define PLC_MODULATION_FLASH_MAGIC  "TMOD"
+#define PLC_MESSAGE_PAYLOAD_LATE_COUNT      20
+
+
+typedef enum _PLCChannelState
+{
+    PLC_MSG_STATE_PWROFF =0,
+    PLC_MSG_STATE_PWROFF_DELAY,
+    PLC_MSG_STATE_PWRON,
+    PLC_MSG_STATE_PWRON_DELAY,
+    PLC_MSG_STATE_RESET,                             // 1: To reset PLC modem
+    PLC_MSG_STATE_GETSYSTEMINFO,            // 2: To get system info
+    PLC_MSG_STATE_LOADSYSTEMCFG_PORT,   // 3:To config data/diag port
+    PLC_MSG_STATE_LOADSYSCFG_DEVICE,    // 4: To config Device mode
+    PLC_MSG_STATE_LOADSYSCFG_G3,            // 5: To config G3 para
+    PLC_MSG_STATE_SHUTDOWN,                     // 6: To shutdown
+    PLC_MSG_STATE_POSTSHUTDOWN,             // 7: After shutdown,need wating 1.5 seconds 
+    PLC_MSG_STATE_TX_INFO,                          // 8: To config Tx para
+    PLC_MSG_STATE_RX_INFO,                          // 9: To config Rx para
+    PLC_MSG_STATE_ATTACH,                           // 10: Try to attach network 
+    PLC_MSG_STATE_NETWORK,                   // 11: Sync FW version infomation
+    PLC_MSG_STATE_MAX
+}PLCChannelState;
+
+typedef enum _PLCMessageRcvState
+{
+    PLC_MSG_RCV_EMPTY,                         // buffer is empty
+    PLC_MSG_RCV_PREHEAD,                           // Already got valid head + CRC
+    PLC_MSG_RCV_POSTHEAD,
+    PLC_MSG_RCV_COMPLETE,
+    PLC_MSG_RCV_MAX
+}PLCMessageRcvState;
+
+#pragma pack(4)
+
+typedef enum _PLCToneMaskId
+{
+	PLC_MASK_CENELEC_A_36 = 0,
+	PLC_MASK_CENELEC_A_25,
+	PLC_MASK_CENELEC_B,
+	PLC_MASK_CENELEC_BC,
+	PLC_MASK_CENELEC_BCD,
+	PLC_MASK_FCC_LB,
+	PLC_MASK_FCC_HB,
+	PLC_MASK_FCC_FB,
+	PLC_MASK_MAX
+}PLCToneMaskId;
+
+typedef enum _PLCMessageIds
+{
+	PLC_MSG_DATA_TRANSFER = 0x00,
+	PLC_MSG_GET_SYSTEM_INFO = 0x01,
+	PLC_MSG_GET_PHY_PIB = 0x02,
+	PLC_MSG_GET_MAC_PIB = 0x03,
+	PLC_MSG_SET_INFO = 0x04,
+	PLC_MSG_SHUTDOWN = 0x05,
+	PLC_MSG_SETUP_ALARM = 0x06,
+	PLC_MSG_ALARM = 0x07,
+	PLC_MSG_NETWORK_REGISTER = 0x08,
+	PLC_MSG_NETWORK_START = 0x08,
+	PLC_MSG_NETOWORK_UNREGISTER = 0x09,
+	PLC_MSG_CONNECT = 0x0A,
+	PLC_MSG_DISCONNECT = 0x0B, 
+	PLC_MSG_LOAD_SYSTEM_CONFIG = 0x0C,
+	PLC_MSG_SET_MAC_PIB = 0x0D,
+	PLC_MSG_CLEAR_PHY_PIB = 0x0E,
+	PLC_MSG_CLEAR_MAC_PIB = 0x0F,
+	PLC_MSG_ATTACH = 0x10,
+	PLC_MSG_DETACH = 0x11,
+	PLC_MSG_DISCOVER = 0x12,
+	PLC_MSG_FW_UPGRADE = 0x13,
+	PLC_MSG_MAX
+}PLCMessageIds;
+
+typedef enum _PLCResetType
+{
+    PLC_RESET_SOFT =0x0,
+    PLC_RESET_SHUTDOWN,
+    PLC_RESET_MAX
+}PLCResetType;
+
+typedef enum _PLCDiscoverType
+{
+    PLC_DISCOVER_NETWORK = 0,
+    PLC_DISCOVER_ROUTE,
+    PLC_DISCOVER_PATH,
+    PLC_DISCOVER_BEACON,
+    PLC_DISCOVER_MAX
+}PLCDiscoverType;
+
+typedef enum _PLCPorts
+{
+	PLC_PORT_SCI_A = 0,
+	PLC_PORT_SCI_B,
+	PLC_PORT_MAX
+}PLCPorts;
+
+typedef enum _PLCModulationMode
+{
+    PLC_MODULATION_ROBO = 0,
+    PLC_MODULATION_BPSK,
+    PLC_MODULATION_QPSK,
+    PLC_MODULATION_8PSK,
+    PLC_MODULATION_RESERVED,
+    PLC_MODULATION_SUPERROBO,
+    PLC_MODULATION_MAX
+}PLCModulationMode;
+
+
+#pragma pack(1)
+// Define the data structure
+
+
+typedef struct _Header
+{
+	BYTE _Id;			//消息种类
+	BYTE _Origin;		//7(ORG:1 host to PLC; 0 PLC to host)  6(RPY确认回复位。如果设置此位，消息接受者需要返回确认信息（返回消息头，重置CRC或者设置CRC为0，设置RPY，无消息体）。此位只用于DATA_TRANSFER.indicate) 5~4(RESV保留) 3~0(SEQ序列号)
+	UINT16 _Length;     //16位消息长度。消息体长度+消息头CRC长度（2字节）+消息体CRC长度（2字节）（无消息体的消息长度为4）。支持的最大消息体长度为1500字节，即最大消息长为1504字节。
+}Header;
+
+
+
+typedef struct _CRC_Header
+{
+	UINT16 _HeaderCRC;  //消息头的CRC16数值。从Message Type开始到Message PayLoad Length。不包含消息头CRC16和消息体的CRC16。0代表不提供CRC16
+	UINT16 _MessageCRC; //Message PayLoad CRC16：消息体的CRC16
+}CRC_Header;
+
+typedef struct _GetSystemInfoRequest
+{
+	Header _Header;
+	CRC_Header _CRC_Header;
+}GetSystemInfoRequest;
+
+typedef struct _SystemInfo
+{
+	Header _Header;
+	CRC_Header _CRC_Header;
+	
+	BYTE _Build;
+	BYTE _Revision;
+	BYTE _Minor;
+	BYTE _Major;
+	
+	BYTE _Reserved_0[18];
+	BYTE _DeviceType;
+	BYTE _DeviceMode;
+	UINT16 _HardwareRevision;
+	BYTE Reserved_1[6];
+	BYTE _PortAssigments;
+	BYTE _Reserved_2[7];
+	BYTE _TMR_COH_Flags;
+	BYTE _Reserved_3[3];
+	BYTE _LongAddress[8];
+	BYTE _Reserved_4[6];
+}SystemInfo;
+
+typedef struct _PortDesignation
+{
+	UINT16 _Type;		// 0x0001
+	UINT16 _Length;         // 1
+	BYTE _Port;
+}PortDesignation;
+
+typedef struct _SystemConfig
+{
+	UINT16 _Type;		// 0x0003
+	UINT16 _Length;         // 26
+	BYTE _Reserved_0[18 + 6];
+	BYTE _DeviceMode;
+	BYTE _Reserved_1;
+}SystemConfig;
+
+typedef struct _G3Configuration
+{
+	UINT16 _Type;		//0x0008
+	UINT16 _Length;	//16
+	BYTE _Reserved_0[2];
+	BYTE _LongAddress[8];
+	BYTE _Reserved_1[4];
+	UINT16 _MAC_SegmentSize;  // obsolete for new dsp s/w but needs to be set to 239 for older versions.
+}G3Configuration;
+
+typedef struct _LoadSystemConfig
+{
+	Header _Header;
+	CRC_Header _CRC_Header;
+	
+	PortDesignation * _Port;
+	SystemConfig * _SystemConfig;
+	G3Configuration * _G3_Config;
+}LoadSystemConfig;
+
+typedef struct _StatusMessage
+{
+	Header _Header;
+	CRC_Header _CRC_Header;
+	UINT16 _Status;
+}StatusMessage;
+
+typedef struct _ShutDownMessage
+{
+	Header _Header;
+	CRC_Header _CRC_Header;
+	UINT16 _ResetType;
+}ShutDownMessage;
+
+typedef struct _DiscoverNetworkRequest
+{
+	Header _Header;
+	CRC_Header _CRC_Header;
+	BYTE _DiscoverType;
+	BYTE _Duration;			
+}DisconverNetworkRequest;
+
+typedef struct _PAN_Description
+{
+	BYTE _CoordAddressMode;
+	BYTE _LQI;
+	UINT16 _Coord_PAN_Address;
+	UINT16 _ShortAddress;
+	UINT16 _RoutingCost;
+}PAN_Description;
+
+typedef struct _DiscoverNetworkConfirm
+{
+	Header _Header;
+	CRC_Header _CRC_Header;
+	BYTE _DiscoverType;
+	BYTE _Reserved;	
+	UINT16 _Status;
+	UINT16 _PAN_Count;
+	PAN_Description _PAN_Info[];
+}DiscoverNetworkConfirm;
+
+typedef struct _AttachRequest
+{
+	Header _Header;
+	CRC_Header _CRC_Header;
+	
+	UINT16 _PAN_Id;
+	UINT16 _LBA_Address;  // short address..
+}AttachRequest;
+
+typedef struct _AttachConfirm
+{
+	Header _Header;
+	CRC_Header _CRC_Header;
+	
+	UINT16 _Status;
+	UINT16 _NetworkAddress; 
+	UINT16 _PAN_Id;
+}AttachConfirm;
+
+typedef struct _DetachRequest
+{
+	Header _Header;
+	CRC_Header _CRC_Header;
+	BYTE _ExtendedAddress[8];
+}DetachRequest;
+
+typedef struct _DetachConfirm
+{
+	Header _Header;
+	CRC_Header _CRC_Header;
+	
+	UINT16 _Status;
+	BYTE _ExtendedAddress[8];
+}DetachConfirm;
+
+
+typedef struct _IPv6
+{
+	BYTE   _Header[4];      //版本号(4位):流量类型(8位):流标签(20位)
+	UINT16 _PayloadLength;  // = UPD Length 负载长度(16位)
+	UINT8  _NextHeader;		// = 17 - udp message
+	UINT8  _HopLimit;		//跳数限制
+	
+	BYTE   _SourceAddress[16];
+	BYTE   _DestinationAddress[16];
+}IPv6;
+
+// variable length struct
+typedef struct _UDP
+{
+	UINT16 _SourcePort;
+	UINT16 _DestinationPort;
+	UINT16 _Length;   // includes data and this header, min size is 8.
+	UINT16 _CRC;			// aways set to zero for now
+	BYTE  _Data[];
+}UDP;
+
+typedef struct _DataTransferRequest
+{
+	Header _Header;
+	CRC_Header _CRC_Header;
+	
+	BYTE _NSDU_Handle;
+	BYTE _Flags;
+	IPv6 _IPv6_Header;
+	UDP _UDP_Message;
+}DataTransferRequest;
+
+typedef struct _DataTransfer
+{
+	Header _Header;
+	CRC_Header _CRC_Header;
+	
+	UINT16 _Spacer;
+	
+	IPv6 _IPv6_Header;
+	UDP _UDP_Message;
+}DataTransfer;
+
+typedef struct _DataTransferConfirm
+{
+	Header _Header;
+	CRC_Header _CRC_Header;
+	
+	BYTE _NSDU_Handle;
+	BYTE _ConfirmFlag;
+	UINT16 _Status;
+}DataTransferConfirm;
+
+typedef struct _DataTransferIndication
+{
+	Header _Header;
+	CRC_Header _CRC_Header;
+	
+	BYTE _LQI;
+	BYTE _Flags;
+	IPv6 _IPv6_Header;
+	UDP _UDP_Message;
+}DataTransferIndication;
+
+typedef struct _SetInfo_TX
+{
+	Header _Header;
+	CRC_Header _CRC_Header;
+	
+	UINT16 _InfoType; // 0x0002
+	UINT16 _InfoLength; // 16/18 depending on G3 version (5.0 and greater)
+	BYTE _Flags;			// Band select, coh, tmr
+	BYTE _Modulation;
+	UINT16 _TX_Level;
+	BYTE _ToneMask[14];
+}SetInfo_TX;
+
+typedef struct _SetInfo_RX
+{
+	Header _Header;
+	CRC_Header _CRC_Header;	
+	UINT16 _InfoType; // 0x0003
+	UINT16 _InfoLength; // 16/18 depending on G3 version (5.0 and greater)
+	BYTE _Reserved;
+	BYTE _Flags;				//Band select, coh, bli, agc
+	UINT16 _GainValue;
+	BYTE _ToneMask[14];
+}SetInfo_RX;
+
+
+
+typedef struct _PLCMessageRCVDescriptor
+{
+    Header head;
+    CRC_Header ccHead;
+    unsigned char  pMsg[PLC_MESSAGE_MAXIUM_SIZE];
+    PLCMessageRcvState rcvState;    // Receive state
+    unsigned short count; 
+} __attribute__((aligned(4))) PLCMessageRCVDescriptor;
+
+
+typedef struct _PLCMessagerStateManager
+{
+     PLCChannelState chState;
+     unsigned int   waitCount;
+	 unsigned int   retryCount;
+     PLCMessageRCVDescriptor rcvDesriptor;
+}PLCMessagerStateManager;
+
+// Define a function pointer for installing app protocol callback hander
+typedef void  (*FuncAppMessageHandler)(BYTE *pMsg);
+
+// send data out of plc channel
+errorCode    plcWrite(BYTE* bytes, UINT16 length);
+
+// Create PLC data packet
+errorCode  createPLCDataPacket( BYTE* srcBuf, UINT16 srcLen, BYTE* dstBuf, UINT16* dstLen);
+
+// PLC Messager Task
+void    plcMessagerTask();
+
+PLCChannelState plcMessagerGetChannelState();
+
+errorCode   plcMessagerInstallAppProtocolHandler(FuncAppMessageHandler pfunc);
+
+errorCode plcMessagerReset();
+
+PLCModulationMode plcGetModulationMode();
+
+errorCode plcStoreModulationMode();
+
+errorCode plcRetrieveModulationMode();
+
+//errorCode plcGetLatestSNR(int *sInt,int *sDec);
+errorCode plcGetLatestSNR(float *pSNR);
+
+
+errorCode SendGetSystemInfoRequest();
+PLCMessageRcvState  plcMsgRetriever(PLCMessageRCVDescriptor *pDes);
+
+#endif

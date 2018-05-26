@@ -1,0 +1,2271 @@
+/***************************************************************************************
+File name: taxControlDev.c
+Date: 2016-8-24
+Author: Wangwei
+Description:
+     This file contain all the interface for taxcontroldevice to read initialization info and gasoline transaction.
+     The lower support layer is uartPort.c since the datalink to this device is usart[0,3].
+***************************************************************************************/
+#include <string.h>
+#include <stdlib.h>
+#include "SEGGER_RTT.h"
+#include "errorCode.h"
+#include "gasolineDataStore_Retrieve.h"
+#include "taxControlInterface.h"
+#include "flashMgr.h"
+#include "uartPort.h"
+#include "board.h"
+#include "localTime.h"
+#include "time.h"
+#include "transactionHelper.h"
+
+#define dbgPrintf   SEGGER_RTT_printf
+#define MIN(a,b)    ((a<=b)?a:b)
+#define MAX(a,b)    ((a>=b)?a:b)
+#define OPPPSITE(a) ((a==0)?1:0)
+
+// Static Argumnent Definition 
+static TaxControlDevManager taxControlDevManager;
+
+/************************************************************************************************
+Function Name: getTaxControlDevManager()
+Description:
+     Get the pointer of "TaxControlDevManager"
+Para:
+     NULL
+Return:
+     The pointer.
+************************************************************************************************/
+TaxControlDevManager *  getTaxControlDevManager()
+{
+    return &taxControlDevManager;
+}
+static errorCode taxControlDevTaxMonthProcessing(TaxControlDevInfo *pDev) ;
+/************************************************************************************************
+Function Name: taxControlDeviceGetGunNoById
+Description:
+	Intends to get the # of gun controled by the tax control device ID
+Parameter:
+       id: MSB of tax control device ID(20 bytes of ASCII string according to SPEC)
+return:
+	Number of gun controled bu this device, 0 means unrecognized control device.
+
+Infomation:
+	KTK naming rule(CPUID, TAXID):    
+	    (1) AXXX XXXX XXXX XXXX XXXX,	1 gun
+	    (2) BXXX XXXX XXXX XXXX XXXX,	2 guns
+	    (3) DXXX XXXX XXXX XXXX XXXX,	4 guns
+	    (4) FXXX XXXX XXXX XXXX XXXX,	6 guns
+	    (5) HXXX XXXX XXXX XXXX XXXX,	8 guns
+
+	YTSF:(Not very solid definition)
+	    (1) [0175600000,2007700000)    1 gun
+	    (2) [2007700000,4001900000)    2 guns
+	    (3) [4001900000,9999999999]    4 guns
+
+*************************************************************************************************/
+static  unsigned char taxControlDeviceGetGunNoById(unsigned char *pFactorySerialId)
+{
+	if(pFactorySerialId == 0)
+		{
+			return 0;
+		}
+
+	if((pFactorySerialId[0] >= 'A') && (pFactorySerialId[0] <='H'))	// KeTaiKang taxControlDevice ID naming SPEC
+	{
+		switch	(pFactorySerialId[0])
+		{
+			case 'A':
+				return 1;
+			case 'B':
+				return 2;
+			case 'D':
+				return 4;
+			case 'F':
+				return 6;
+			case 'H':
+				return 8;
+			default:				// Currently don't know yet.(2016-8-31)
+				dbgPrintf(0,"taxControlDeviceGetGunNoById: Got invlid KTK taxID information\n");
+				return 0;
+		}		
+	}
+    else if((pFactorySerialId[0] >= '0') && (pFactorySerialId[0] <= '9'))
+        {
+            long long t;
+            unsigned char c[11];
+            c[10] = 0;
+            memcpy(c,pFactorySerialId,10);
+            t=atoll(c);
+
+            if(t >= 4001900000LL)
+                {
+                    return 4;
+                }    
+            else if(t >= 2007700000)
+                {
+                    return 2;
+                }
+            else if(t >= 0175600000)
+                {
+                    return 1;
+                }
+            else
+                {
+                    return 0;
+                }
+                
+        }
+    else
+        {
+            return 0;
+        }
+	
+}
+/************************************************************************************************
+Function Name: taxControlDeviceGetBrandById
+Description:
+	Intends to get the device branc by the 1st character of tax control device ID
+Parameter:
+      pFactorySerialId:[I], the unique ID of tax control device
+return:
+	Brand of device.
+
+Infomation:
+	KTK naming rule(CPUID, TAXID):    
+	    (1) AXXX XXXX XXXX XXXX XXXX,	1 gun
+	    (2) BXXX XXXX XXXX XXXX XXXX,	2 guns
+	    (3) DXXX XXXX XXXX XXXX XXXX,	4 guns
+	    (4) FXXX XXXX XXXX XXXX XXXX,	6 guns
+	    (5) HXXX XXXX XXXX XXXX XXXX,	8 guns
+
+	YTSF:(Not very solid definition)
+	    (1) [0175600000,2007700000)    1 gun
+	    (2) [2007700000,4001900000)    2 guns
+	    (3) [4001900000,9999999999]    4 guns
+
+*************************************************************************************************/
+static  TaxControlDevBrand taxControlDeviceGetBrandById(unsigned char *pFactorySerialId)
+{
+    if(pFactorySerialId == 0)
+		{
+			return 0;
+		}
+
+    if((pFactorySerialId[0] >= 'A') && (pFactorySerialId[0] <='H'))
+        return  TAX_CONTROL_DEVICE_KTK;
+    else if((pFactorySerialId[0] >= '0') && (pFactorySerialId[0] <='9'))
+        return  TAX_CONTROL_DEVICE_YTSF;
+    else
+        {
+            //dbgPrintf(0,"taxControlDeviceGetBrandById: Got unsupported brand tax control device\r\n");            
+            return  TAX_CONTROL_DEVICE_MAX;
+        }
+    
+}
+/*************************************************************************************************
+Name: AllocateTaxDeviceTotalStorageOffset
+Description: 
+    We reserved 16 sectors to store the _total_data for each guns, this function try to allocate the sector offset for each device.
+Para:
+	pDevMgr:[I/O]  Tax control device manager 
+Return:
+       always E_SUCCESS;
+**************************************************************************************************/
+static  errorCode   AllocateTaxDeviceTotalStorageOffset(TaxControlDevManager *pDevMgr)
+{
+     if((pDevMgr->taxControlDevInfo[0].bind == TAX_CONTROL_DEVICE_BOUND) &&
+         (pDevMgr->taxControlDevInfo[1].bind == TAX_CONTROL_DEVICE_BOUND))
+        {
+           if((pDevMgr->taxControlDevInfo[0].gunBaseNumber == TAX_CONTROL_MACHINE_GUNNO_MAX) && (pDevMgr->taxControlDevInfo[1].gunBaseNumber == TAX_CONTROL_MACHINE_GUNNO_MAX))
+            {
+                pDevMgr->taxControlDevInfo[0].gunBaseNumber = 0;
+                pDevMgr->taxControlDevInfo[1].gunBaseNumber = TAX_CONTROL_DEVICE_GUNNO_MAX;
+                dbgPrintf(0,"AllocateTaxDeviceTotalStorageOffset: Both PORTs bounded and None Matched, allocate defualt base sector number dev0:%d  dev1:%d\r\n",pDevMgr->taxControlDevInfo[0].gunBaseNumber,pDevMgr->taxControlDevInfo[1].gunBaseNumber);
+            }
+           else 
+            {
+                if(pDevMgr->taxControlDevInfo[0].gunBaseNumber == TAX_CONTROL_MACHINE_GUNNO_MAX)
+                    {
+                        if(pDevMgr->taxControlDevInfo[1].gunBaseNumber == 0)
+                            {
+                                pDevMgr->taxControlDevInfo[0].gunBaseNumber = TAX_CONTROL_DEVICE_GUNNO_MAX;
+                                dbgPrintf(0,"AllocateTaxDeviceTotalStorageOffset: Both PORTs bounded, PORT1 matched and start from 0, assign sector 8 to PORT0\r\n");
+                            }
+                        else if(pDevMgr->taxControlDevInfo[1].gunBaseNumber == TAX_CONTROL_DEVICE_GUNNO_MAX)
+                            {
+                                pDevMgr->taxControlDevInfo[0].gunBaseNumber = 0;
+                                dbgPrintf(0,"AllocateTaxDeviceTotalStorageOffset: Both PORTs bounded, PORT1 matched and start from 8, assign sector 0 to PORT0\r\n");                               
+                            }
+                        else
+                            {
+                                dbgPrintf(0,"!!!!!AllocateTaxDeviceTotalStorageOffset: PORT binding wrong 1\r\n");
+                                bsp_DelayMS(1000);
+                                NVIC_SystemReset();
+                            }
+                    }
+                else if(pDevMgr->taxControlDevInfo[1].gunBaseNumber == TAX_CONTROL_MACHINE_GUNNO_MAX)
+                    {
+                         if(pDevMgr->taxControlDevInfo[0].gunBaseNumber == 0)
+                            {
+                                pDevMgr->taxControlDevInfo[1].gunBaseNumber =TAX_CONTROL_DEVICE_GUNNO_MAX;
+                                dbgPrintf(0,"AllocateTaxDeviceTotalStorageOffset: Both PORTs bounded, PORT0 matched and start from 0, assign sector 8 to PORT1\r\n");
+                            }
+                        else if(pDevMgr->taxControlDevInfo[0].gunBaseNumber == TAX_CONTROL_DEVICE_GUNNO_MAX)
+                            {
+                                pDevMgr->taxControlDevInfo[1].gunBaseNumber = 0;
+                                dbgPrintf(0,"AllocateTaxDeviceTotalStorageOffset: Both PORTs bounded, PORT0 matched and start from 8, assign sector 0 to PORT1\r\n");                                
+                            }
+                        else
+                            {
+                                dbgPrintf(0,"!!!!!AllocateTaxDeviceTotalStorageOffset: PORT binding wrong 2\r\n");
+                                bsp_DelayMS(1000);
+                                NVIC_SystemReset();
+                            }
+                    }
+                else
+                    {
+                        if((pDevMgr->taxControlDevInfo[0].gunBaseNumber == 0) && (pDevMgr->taxControlDevInfo[1].gunBaseNumber ==TAX_CONTROL_DEVICE_GUNNO_MAX ) ||
+                            (pDevMgr->taxControlDevInfo[1].gunBaseNumber == 0) && (pDevMgr->taxControlDevInfo[0].gunBaseNumber ==TAX_CONTROL_DEVICE_GUNNO_MAX ))
+                            {
+                                dbgPrintf(0,"AllocateTaxDeviceTotalStorageOffset: Both dev0 and dev1 recoverd successfully\r\n");
+
+                            }
+                        else
+                            {
+                                dbgPrintf(0,"!!!!!AllocateTaxDeviceTotalStorageOffset: PORT binding wrong 3\r\n"); 
+                                bsp_DelayMS(1000);
+                                NVIC_SystemReset();                               
+                            }
+                    }
+            }        
+        }
+     else if(pDevMgr->taxControlDevInfo[0].bind == TAX_CONTROL_DEVICE_BOUND)
+        {
+            if(pDevMgr->taxControlDevInfo[0].gunBaseNumber == TAX_CONTROL_MACHINE_GUNNO_MAX)
+                {
+                     pDevMgr->taxControlDevInfo[0].gunBaseNumber = 0; 
+                     dbgPrintf(0,"AllocateTaxDeviceTotalStorageOffset: Only Port:0 bounded, No      matched History_data, use default base sector:%d\r\n",pDevMgr->taxControlDevInfo[0].gunBaseNumber);
+                }
+            else
+                {
+                     dbgPrintf(0,"AllocateTaxDeviceTotalStorageOffset: Only Port:0 bounded, Found matched History_data, use original base sector:%d\r\n",pDevMgr->taxControlDevInfo[0].gunBaseNumber);
+                }
+        }
+     else if(pDevMgr->taxControlDevInfo[1].bind == TAX_CONTROL_DEVICE_BOUND)
+        {
+             if(pDevMgr->taxControlDevInfo[1].gunBaseNumber == TAX_CONTROL_MACHINE_GUNNO_MAX)
+                {
+                    pDevMgr->taxControlDevInfo[1].gunBaseNumber = 0;
+                     dbgPrintf(0,"AllocateTaxDeviceTotalStorageOffset: Only Port:1 bounded, No      matched History_data, use default base sector:%d\r\n",pDevMgr->taxControlDevInfo[1].gunBaseNumber);                    
+                }
+             else
+                {
+                     dbgPrintf(0,"AllocateTaxDeviceTotalStorageOffset: Only Port:1 bounded, Found  matched History_data, use original base sector:%d\r\n",pDevMgr->taxControlDevInfo[1].gunBaseNumber);                    
+                }
+        }
+
+    return E_SUCCESS;
+}
+/*************************************************************************************************
+Name: taxControlCmdCreate
+Description: Generate Tax control device query command
+Para:
+	cmd:[I], tax control device query command
+	gunNo:[I], target gun number
+	buf:[I/O], buffer to accomodate the generated command frame
+	size:[I/O], the bytes number of generated command frame 
+**************************************************************************************************/
+static errorCode taxControlCmdCreate(unsigned char cmd, unsigned char gunNo,unsigned char *buf, unsigned short *size, unsigned char rtnMethode)
+{
+	LocalTimeStamp ltm;
+    u32 timestick;
+    struct tm *t;
+    
+    int	i=0;
+	if((buf == 0) || (size == 0 ) || (gunNo >= TAX_CONTROL_DEVICE_GUNNO_MAX))
+		return  E_INPUT_PARA;
+	
+	switch	(cmd)
+		{
+			case TAX_CONTROL_CMD_QUERY_INFO:
+				{
+					TaxInitInfoQueryCmd *pInit= (TaxInitInfoQueryCmd *)buf;
+					memset((char *)pInit,0,sizeof(TaxInitInfoQueryCmd));
+					pInit->header.cmd = TAX_CONTROL_CMD_QUERY_INFO;
+					pInit->header.frameNo = 0xFF;
+					pInit->header.preamable = TAX_CONTROL_PREAMABLE;
+					pInit->header.length = sizeof(TaxInitInfoQueryCmd) - 2;    // length doesn't count preamable and itself
+					pInit->gunNo = 0;									   // Query taxinfo by gunNo=0 is safe since each taxcontrol device at least has one gun
+					pInit->cc = 0x0;
+
+					for(i=2;i<(sizeof(TaxInitInfoQueryCmd)-1);i++)		// cc doesn't caculate preamable,length and itself
+						pInit->cc = pInit->cc ^ *(buf+i); 	
+					
+					*size = sizeof(TaxInitInfoQueryCmd); 
+					break;
+				}
+			
+			case TAX_CONTROL_CMD_QUERY_ONCE:
+				{
+					TaxOnceQueryCmd* pOnce= (TaxOnceQueryCmd *)buf;
+					memset((char *)pOnce,0,sizeof(TaxOnceQueryCmd));
+					pOnce->header.cmd = TAX_CONTROL_CMD_QUERY_ONCE;
+					pOnce->header.frameNo = 0xFF;
+					pOnce->header.preamable = TAX_CONTROL_PREAMABLE;
+					pOnce->header.length = sizeof(TaxOnceQueryCmd) - 2;    // length doesn't count preamable and itself
+					pOnce->gunNo = gunNo;
+					pOnce->rtnMethod = rtnMethode;
+					pOnce->cc = 0x0;
+
+					for(i=2;i<(sizeof(TaxOnceQueryCmd)-1);i++)		// cc doesn't caculate preamable,length and itself
+						pOnce->cc = pOnce->cc ^ *(buf+i); 	
+					
+					*size = sizeof(TaxOnceQueryCmd); 	
+					break;
+				}	
+			case TAX_CONTROL_CMD_QUERY_DAY:					// Not deploy currently, not need implement
+			case TAX_CONTROL_CMD_QUERY_MONTH:      //wawe 2016-11-2 14:23:30
+				{
+					TaxMonthlyQueryCmd* pMonth= (TaxMonthlyQueryCmd *)buf;
+                                                
+                    timestick=getLocalTick();
+                    timestick+=LOCAL_TIME_ZONE_SECOND_OFFSET;                          
+                    t = localtime((time_t *)&timestick);
+                             
+                    sprintf(ltm.year,"%4d", t->tm_year+REFERENCE_YEAR_BASE);
+                    sprintf(ltm.month,"%2d",t->tm_mon);  //查的是上月累计
+                                    
+					memset((char *)pMonth,0,sizeof(TaxMonthlyQueryCmd));
+					pMonth->header.cmd = TAX_CONTROL_CMD_QUERY_MONTH;
+					pMonth->header.frameNo = 0xFF;
+					pMonth->header.preamable = TAX_CONTROL_PREAMABLE;
+					pMonth->header.length = sizeof(TaxMonthlyQueryCmd) - 2;    // length doesn't count preamable and itself
+					pMonth->gunNo = gunNo;
+                    
+                    memcpy(pMonth->year,ltm.year,4);
+                    memcpy(pMonth->month,ltm.month,2);//查上月累计数据
+                                              
+					pMonth->rtnMethod = rtnMethode;
+					pMonth->cc = 0x00;
+
+					for(i=2;i<(sizeof(TaxMonthlyQueryCmd)-1);i++)		// cc doesn't caculate preamable,length and itself
+						pMonth->cc = pMonth->cc ^ (*(buf+i)); 	
+					
+					*size = sizeof(TaxMonthlyQueryCmd); 	
+					break;
+                    
+				}
+			case TAX_CONTROL_CMD_QUERY_TOTAL:
+				{
+					TaxTotalQueryCmd* pTotal= (TaxTotalQueryCmd *)buf;
+					memset((char *)pTotal,0,sizeof(TaxTotalQueryCmd));
+					pTotal->header.cmd = TAX_CONTROL_CMD_QUERY_TOTAL;
+					pTotal->header.frameNo = 0xFF;
+					pTotal->header.preamable = TAX_CONTROL_PREAMABLE;
+					pTotal->header.length = sizeof(TaxTotalQueryCmd) - 2;    // length doesn't count preamable and itself
+					pTotal->gunNo = gunNo;
+					pTotal->amountMode = TAX_TOTAL_ACCOUNT_MODE_ACTUAL;
+					pTotal->rtnMethod = rtnMethode;
+					pTotal->cc = 0x00;
+
+					for(i=2;i<(sizeof(TaxTotalQueryCmd)-1);i++)		// cc doesn't caculate preamable,length and itself
+						pTotal->cc = pTotal->cc ^ (*(buf+i)); 	
+					
+					*size = sizeof(TaxTotalQueryCmd); 	
+					break;
+				}	
+			
+			default:
+				return	E_NOT_SUPPORT;
+			break;
+			
+		}
+	return E_SUCCESS;
+};
+
+/*********************************************************************************************
+Function Name: taxControlResponseRetriever
+Description:
+	This function intends to retrieve tax control's response.
+Parameter:
+	port:[I], uart port number;
+	pRespBuf:[I/O], response message;
+	len: Expected data length
+Return:
+	E_SUCCESS: when fetch number of data
+	E_EMPTY:  the buffer is empty
+	E_INPUT_PARA: At lease one input para is wrong. 
+	E_FAIL: when fail to fetch expected number of data
+**********************************************************************************************/
+errorCode  taxControlResponseRetriever(unsigned port, void *pRespBuf,unsigned short len)
+{	
+	return (uartRead(port, pRespBuf, len)); 
+}
+
+/*******************************************************************************************************************************
+Function Name: taxControlDevToPortBinding
+Description:
+      This function intends to bind tax control device to uart port after
+      1. CPU reset;
+      2. Detected uart port occurs re-connecting event.
+
+      Currently, based on system design, only at most supports 2 tax control device and the uart port must be 0,1. After bind,  Private(static) "taxControlDevManager"
+variable will be initialized and waiting for GTC sync, then ready for sampling.      
+
+Parameter:
+    bReq:[I], Bing request for PORT0,PORT1 or both of them
+Return:
+	E_SUCCESS:   Always return successfully.
+	E_DEVICE:      Doesn't found any valid tax control device.  
+*******************************************************************************************************************************/
+errorCode taxControlDevToPortBinding(TaxControlDevBindingRequest bReq)
+{
+    unsigned char start,end;
+    int i,k,n,port;
+    unsigned short size,availBytes;
+    unsigned char pCmdBuf[64];
+    unsigned char pRespBuf[128];
+    UartPortState *pUartPortState;
+    TaxOfficialInitInfoQueryResp *pOfficialTaxResp;
+    TaxFactoryInitInfoQueryResp *pFactoryTaxResp;
+    TaxTotalQueryResp *pTotalResp;
+
+    TaxControlBindingState bindingState[TAX_CONTROL_DEVICE_MAX_NUM];
+    
+    TaxControlDevManager *pTaxControlDevManager;
+
+    int retryCount[TAX_CONTROL_DEVICE_MAX_NUM]={0};
+    int waitCount[TAX_CONTROL_DEVICE_MAX_NUM]={0};
+    TaxHistoryTotalRecordInfo *pTaxHistoryTotalRecordInfo = getTaxHistoryTotalRecordInfo();
+    unsigned char gunBaseNo = 0;   
+    unsigned char gunInitialized[UART_TAX_PORT_NUM] ={0}; 
+    char gunRepeatCount[UART_TAX_PORT_NUM] = {0xff};
+
+    pTaxControlDevManager = &taxControlDevManager;
+    pUartPortState = uartGetPortState();
+
+    // based on the binding request, allocate the target start and end for uart_port/device handler
+    switch(bReq)
+        {
+            case  TAX_CONTROL_DEV_BINDING_REQ_TOTAL:
+                {
+                    start = 0;
+                    end  = 1;
+                    bindingState[0] = TAX_CONTROL_BINDING_STATE_IDLE;
+                    bindingState[1] = TAX_CONTROL_BINDING_STATE_IDLE;
+
+                    pUartPortState[0].bState = PORT_UNBOUND;
+                    pUartPortState[1].bState = PORT_UNBOUND;
+
+                    pTaxControlDevManager->taxControlDevInfo[0].bind = TAX_CONTROL_DEVICE_UNBOUND;
+                    pTaxControlDevManager->taxControlDevInfo[1].bind = TAX_CONTROL_DEVICE_UNBOUND;
+
+                    pTaxControlDevManager->taxControlDevInfo[0].gunBaseNumber = TAX_CONTROL_MACHINE_GUNNO_MAX;
+                    pTaxControlDevManager->taxControlDevInfo[1].gunBaseNumber = TAX_CONTROL_MACHINE_GUNNO_MAX;
+                }
+            break;
+
+            case  TAX_CONTROL_DEV_BINDING_REQ_PORT0:
+                {
+                    start =0;
+                    end  =0;
+                    bindingState[0] = TAX_CONTROL_BINDING_STATE_IDLE;
+                    bindingState[1] = TAX_CONTROL_BINDING_STATE_COMPLETE;
+
+                    pUartPortState[0].bState = PORT_UNBOUND;
+                    pTaxControlDevManager->taxControlDevInfo[0].bind = TAX_CONTROL_DEVICE_UNBOUND;
+                    pTaxControlDevManager->taxControlDevInfo[0].gunBaseNumber = TAX_CONTROL_MACHINE_GUNNO_MAX;
+                }
+            break;
+
+            case  TAX_CONTROL_DEV_BINDING_REQ_PORT1:
+                {
+                    start = 1;
+                    end =  1;
+                    bindingState[1] = TAX_CONTROL_BINDING_STATE_IDLE;
+                    bindingState[0] = TAX_CONTROL_BINDING_STATE_COMPLETE;
+                    
+                    pUartPortState[1].bState = PORT_UNBOUND;
+                    pTaxControlDevManager->taxControlDevInfo[1].bind = TAX_CONTROL_DEVICE_UNBOUND;
+                    pTaxControlDevManager->taxControlDevInfo[1].gunBaseNumber = TAX_CONTROL_MACHINE_GUNNO_MAX;
+                }
+            break;
+
+            default:
+                {
+                    dbgPrintf(0,"taxControlDevToPortBinding: Unsupported binding request:%d\r\n",bReq);
+                    return E_FAIL;
+                }            
+            break;    
+        }
+
+    dbgPrintf(0,"taxControlDevToPortBinding: Request:%d start.........\r\n",bReq);
+    while((bindingState[0] != TAX_CONTROL_BINDING_STATE_COMPLETE) || (bindingState[1] != TAX_CONTROL_BINDING_STATE_COMPLETE))
+        {
+            for(port=start;port<=end;port++)
+                {               
+                     switch  (bindingState[port])
+                         {
+                            case TAX_CONTROL_BINDING_STATE_IDLE:
+                                {
+                                    taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_INFO,0,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+                                    uartWriteBuffer(port, pCmdBuf,size);
+                                    uartSendBufferOut(port);
+                                    bindingState[port] = TAX_CONTROL_BINDING_STATE_NEW;
+                                                                                 
+                                    bsp_DelayMS(500);
+                                      
+                                     // Send out a "QUERY ONCE" Command intends to recover the display
+                                     for(i=0;i<4;i++)
+                                          {
+                                            taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_ONCE,i,pCmdBuf,&size,TAX_RESPONSE_RETURN_DISPLAY);
+                                            uartWriteBuffer(port, pCmdBuf,size);
+                                            uartSendBufferOut(port);	
+                                            bsp_DelayMS(500);  
+                                          }                                    
+                                   
+                                        dbgPrintf(0,"taxControlDevToPortBinding: Port %d sent query_tax_control_info command\r\n",port);
+                                }
+                            break;
+
+                              
+                        case    TAX_CONTROL_BINDING_STATE_NEW:
+                            {
+                                waitCount[port]++;
+                                availBytes=uartGetAvailBufferedDataNum(port);
+                                if((availBytes >= sizeof(TaxOfficialInitInfoQueryResp)) || (availBytes>=sizeof(TaxFactoryInitInfoQueryResp)))
+                                {
+                                        taxControlResponseRetriever(port,pRespBuf,availBytes);
+                                        if((availBytes >= sizeof(TaxOfficialInitInfoQueryResp)) && (*(pRespBuf+sizeof(TaxControlHeader)) == 1))//status==1,表明已经初始化过
+                                        {
+                                            pOfficialTaxResp= (TaxOfficialInitInfoQueryResp *)pRespBuf;
+                                            unsigned char cc = 0x00;
+                                            for(i=2;i<sizeof(TaxOfficialInitInfoQueryResp);i++)
+                                                 cc = cc ^ pRespBuf[i];
+                                            
+                                            if((pOfficialTaxResp->header.cmd == TAX_CONTROL_CMD_QUERY_INFO) && (pOfficialTaxResp->taxOrgInitInfo.cc1== cc))	
+                                            {
+
+                                                unsigned char tt[11]={0};   
+                                                pTaxControlDevManager->taxControlDevInfo[port].bind = TAX_CONTROL_DEVICE_BOUND;
+                                                pTaxControlDevManager->taxControlDevInfo[port].port = port;
+                                                pTaxControlDevManager->taxControlDevInfo[port].initLevel = TAX_CONTROL_DEVICE_INIT_OFFICIAL;
+                                                memcpy(pTaxControlDevManager->taxControlDevInfo[port].serialID,pOfficialTaxResp->taxOrgInitInfo.factorySerialNo,10);
+                                                memcpy(pTaxControlDevManager->taxControlDevInfo[port].taxUniqueID,pOfficialTaxResp->taxOrgInitInfo.taxCode,19);
+                                                pTaxControlDevManager->taxControlDevInfo[port].taxUniqueID[19]=pOfficialTaxResp->taxOrgInitInfo.taxCode20;                                                    
+                                                pTaxControlDevManager->taxControlDevInfo[port].brand = taxControlDeviceGetBrandById(pTaxControlDevManager->taxControlDevInfo[port].serialID);
+                                                pTaxControlDevManager->taxControlDevInfo[port].gunTotal = taxControlDeviceGetGunNoById(pTaxControlDevManager->taxControlDevInfo[port].serialID);
+                                                pTaxControlDevManager->taxControlDevInfo[port].gunCurrent = 0;
+                                                pTaxControlDevManager->taxControlDevInfo[port].curCmd = TAX_CONTROL_CMD_QUERY_TOTAL;
+                                                pTaxControlDevManager->taxControlDevInfo[port].stateCount = 0;
+                                                pTaxControlDevManager->taxControlDevInfo[port].sampleState= TAX_CONTROL_SAMPLING_STATE_INIT;
+                                                pTaxControlDevManager->taxControlDevInfo[port].gunRepeatCount = -1;
+
+                                                memcpy(tt,pTaxControlDevManager->taxControlDevInfo[port].serialID,10);
+                                                dbgPrintf(0,"taxControlDevToPortBinding: Port:%d get official tax info:%s\r\n",port,tt);
+ 
+                                                for(k=0;k<TAX_CONTROL_MACHINE_GUNNO_MAX;k++)//查找税控ID相同的记录
+                                                    {
+                                                        if(pTaxHistoryTotalRecordInfo[k].valid == TAX_CONTROL_HISTORY_RECORD_VALID)
+                                                            {                                                                                
+                                                                
+                                                                if(!memcmp(pTaxHistoryTotalRecordInfo[k].record.serialID,pOfficialTaxResp->taxOrgInitInfo.factorySerialNo,10))                                  
+                                                                    break;
+                                                             
+                                                            }
+                                                    }
+                                                      
+                                               if(k<TAX_CONTROL_MACHINE_GUNNO_MAX) // Found matched record, then we can bind current dev control instance to the current port.
+                                                    {                          
+                                                     
+                                                        // Fresh device, need initialize the previous "total" data to an predefinced invalid value
+                                                        for(n=0;n<pTaxControlDevManager->taxControlDevInfo[port].gunTotal;n++)
+                                                            {
+                                                                 pTaxControlDevManager->taxControlDevInfo[port].gunSubState[n]= TAX_CONTROL_PROCESS_SUB_STATE_INIT;                                                               
+                                                            }                                                                     
+                                                        
+                                                        if( pTaxHistoryTotalRecordInfo[k].record.gunNo == 0)
+                                                            {   // Successfully restore the total data from the flash, so, we set the gun initialized.
+                                                                for(n=0;n<pTaxControlDevManager->taxControlDevInfo[port].gunTotal;n++)
+                                                                    {
+                                                                        if(pTaxHistoryTotalRecordInfo[k+n].valid == TAX_CONTROL_HISTORY_RECORD_VALID)
+                                                                            {
+                                                                                pTaxControlDevManager->taxControlDevInfo[port].preData[n].totalAmount = pTaxHistoryTotalRecordInfo[k+n].record.totalAmount;
+                                                                                pTaxControlDevManager->taxControlDevInfo[port].preData[n].totalVolume = pTaxHistoryTotalRecordInfo[k+n].record.totalVolume;
+                                                                                pTaxControlDevManager->taxControlDevInfo[port].preData[n].timeStamp =pTaxHistoryTotalRecordInfo[k+n].record.timeStamp;
+                                                                                pTaxControlDevManager->taxControlDevInfo[port].gunSubState[n]= TAX_CONTROL_PROCESS_SUB_STATE_NORMAL;
+                                                                                dbgPrintf(0,"taxControlDevToPortBinding:Port:%d Gun:%d recovered _Total_",port,n);
+                                                                                dbgPrintf(0,"[Volume:%d",pTaxControlDevManager->taxControlDevInfo[port].preData[n].totalVolume);
+                                                                                dbgPrintf(0," Amount:%d]\r\n",pTaxControlDevManager->taxControlDevInfo[port].preData[n].totalAmount);                                                                              
+                                                                             }                                                                      
+                                                                     }
+                                                                pTaxControlDevManager->taxControlDevInfo[port].gunBaseNumber = k;
+                                                            }
+                                                        else
+                                                        {
+                                                            dbgPrintf(0,"taxControlDevToPortBinding: But Gun No doesn't match, _total_data was not recovered,k=%d,\r\n",k);
+                                                        }
+                                                                                                                                                         
+                                                 
+                                                    }
+                                                else
+                                                {
+                                                        TaxDevInfo  devInfo;
+                                                        dbgPrintf(0,"taxControlDevToPortBinding: New Tax Control Device founded k=%d,\r\n",k);
+                                                        devInfo.head.mark = DIRTY;
+                                                        devInfo.head.type  = 0;
+                                                        devInfo.head.reserved1 = 0;
+                                                        devInfo.head.reserved2 = 0;
+
+                                                        memcpy(devInfo.content.serialNum, pOfficialTaxResp->taxOrgInitInfo.factorySerialNo,10);
+                                                        memcpy(devInfo.content.gunNum,pOfficialTaxResp->taxOrgInitInfo.gunCode,2);
+                                                        memcpy(devInfo.content.taxerRegNum,pOfficialTaxResp->taxOrgInitInfo.taxCode,19);
+                                                        devInfo.content.taxerRegNum[19]= pOfficialTaxResp->taxOrgInitInfo.taxCode20;
+                                                        memcpy(devInfo.content.oilGrade,pOfficialTaxResp->taxOrgInitInfo.oilGrade,4);
+                                                        memcpy(devInfo.content.year,pOfficialTaxResp->taxOrgInitInfo.year,4);                                                        
+                                                        memcpy(devInfo.content.month,pOfficialTaxResp->taxOrgInitInfo.month,2);                                                        
+                                                        memcpy(devInfo.content.day,pOfficialTaxResp->taxOrgInitInfo.day,2);                                                        
+                                                        memcpy(devInfo.content.hour,pOfficialTaxResp->taxOrgInitInfo.hour,2);                                                        
+                                                        memcpy(devInfo.content.minute,pOfficialTaxResp->taxOrgInitInfo.minute,2);                                                        
+                                                        devInfo.content.PortNum = port;
+                                                        devInfo.content.timeStamp = 0;
+
+                                                         // Store the new tax device's info into flash   
+                                                        storeTaxDevInfoRecord(&devInfo);                               
+                                                        dbgPrintf(0,"taxControlDevToPortBinding: New Tax Control Device founded k=%d\r\n",k);
+                                                }                                                
+                                                pUartPortState[port].bState= PORT_BOUNDED;
+                                                bindingState[port]=TAX_CONTROL_BINDING_STATE_COMPLETE;
+                                                    
+                                                
+                                        }
+                                        else
+                                        {
+                                            waitCount[port] = 0;
+                                            retryCount[port]++;
+                                            if(retryCount[port] >=3)
+                                            {
+                                                    dbgPrintf(0,"taxControlDevToPortBinding: Port %d meet 3 times CC/Messagetype error @ NEW state, Stop binding\r\n",port);
+                                                    bindingState[port] = TAX_CONTROL_BINDING_STATE_COMPLETE;                                                                
+                                            }
+                                            else
+                                            {
+                                                    waitCount[port] = 0;
+                                                    taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_INFO,0,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+                                                    uartWriteBuffer(port, pCmdBuf,size);
+                                                    uartSendBufferOut(port);
+                                                
+                                                    bsp_DelayMS(500);
+                                                    for(i=0;i<4;i++)
+                                                      {
+                                                         taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_ONCE,i,pCmdBuf,&size,TAX_RESPONSE_RETURN_DISPLAY);
+                                                         uartWriteBuffer(port, pCmdBuf,size);
+                                                         uartSendBufferOut(port);	
+                                                         bsp_DelayMS(500);  
+                                                      }    
+                                                
+                                                    dbgPrintf(0,"taxControlDevToPortBinding: Port %d meet CC/Messagetype error @ NEW state, try more\r\n",port);
+                                            }
+                                             
+                                        }                                           
+                                        
+                                    }
+                                    else//税控未初始化过
+                                    {
+                                        pFactoryTaxResp= (TaxFactoryInitInfoQueryResp *)pRespBuf;
+                                        unsigned char cc = 0x00;
+                                        for(i=2;i<sizeof(TaxFactoryInitInfoQueryResp)-1;i++)
+                                                cc = cc ^ pRespBuf[i];
+                                                                                            
+                                        if((pFactoryTaxResp->header.cmd == TAX_CONTROL_CMD_QUERY_INFO) && (pFactoryTaxResp->cc== cc))	
+                                            {
+                                                unsigned char tt[11]={0};   
+
+                                                pTaxControlDevManager->taxControlDevInfo[port].bind = TAX_CONTROL_DEVICE_BOUND;
+                                                pTaxControlDevManager->taxControlDevInfo[port].port = port;
+                                                pTaxControlDevManager->taxControlDevInfo[port].initLevel = TAX_CONTROL_DEVICE_INIT_FACTORY;
+                                                memcpy(pTaxControlDevManager->taxControlDevInfo[port].serialID,pFactoryTaxResp->factorySerialNo,10);
+                                                memcpy(pTaxControlDevManager->taxControlDevInfo[port].taxUniqueID,TAX_CONTROL_DEVICE_DXYS_DEBUG_TAX_ID,20);
+                                                pTaxControlDevManager->taxControlDevInfo[port].brand = taxControlDeviceGetBrandById(pTaxControlDevManager->taxControlDevInfo[port].serialID);
+                                                pTaxControlDevManager->taxControlDevInfo[port].gunTotal = taxControlDeviceGetGunNoById(pTaxControlDevManager->taxControlDevInfo[port].serialID);
+                                                pTaxControlDevManager->taxControlDevInfo[port].gunCurrent = 0;
+                                                pTaxControlDevManager->taxControlDevInfo[port].curCmd = TAX_CONTROL_CMD_QUERY_TOTAL;
+                                                pTaxControlDevManager->taxControlDevInfo[port].stateCount = 0;
+                                                pTaxControlDevManager->taxControlDevInfo[port].sampleState= TAX_CONTROL_SAMPLING_STATE_INIT;
+                                                pTaxControlDevManager->taxControlDevInfo[port].gunRepeatCount = -1;
+
+                                                memcpy(tt,pTaxControlDevManager->taxControlDevInfo[port].serialID,10);
+                                                
+                                                dbgPrintf(0,"taxControlDevToPortBinding: Port:%d get factory tax info:%s \r\n",port,tt);
+
+                                                for(k=0;k<TAX_CONTROL_MACHINE_GUNNO_MAX;k++)
+                                                    {
+                                                        if(pTaxHistoryTotalRecordInfo[k].valid == TAX_CONTROL_HISTORY_RECORD_VALID)
+                                                            {                                                                    
+                                                                if(!memcmp(pTaxHistoryTotalRecordInfo[k].record.serialID,pFactoryTaxResp->factorySerialNo,10))                                  
+                                                                    break;
+                                                             
+                                                           }
+                                                    }                                                                                                       
+
+                                               if(k<TAX_CONTROL_MACHINE_GUNNO_MAX) // Found matched record, then we can bind current dev control instance to the current port.
+                                                   {
+                                                        
+                                                         // Here, not read the 1st "total" data out, so set "uninitialized" here
+                                                        for(n=0;n<pTaxControlDevManager->taxControlDevInfo[port].gunTotal;n++)
+                                                            {
+                                                                    pTaxControlDevManager->taxControlDevInfo[port].gunSubState[n]= TAX_CONTROL_PROCESS_SUB_STATE_INIT;
+                                                            }
+                                                         
+                                                        if( pTaxHistoryTotalRecordInfo[k].record.gunNo == 0)
+                                                            {   // Successfully restore the total data from the flash, so, we set the gun initialized.
+                                                                for(n=0;n<pTaxControlDevManager->taxControlDevInfo[port].gunTotal;n++)
+                                                                    {
+                                                                        if(pTaxHistoryTotalRecordInfo[k+n].valid == TAX_CONTROL_HISTORY_RECORD_VALID)
+                                                                            {
+                                                                                    pTaxControlDevManager->taxControlDevInfo[port].preData[n].totalAmount = pTaxHistoryTotalRecordInfo[k+n].record.totalAmount;
+                                                                                    pTaxControlDevManager->taxControlDevInfo[port].preData[n].totalVolume = pTaxHistoryTotalRecordInfo[k+n].record.totalVolume;
+                                                                                    pTaxControlDevManager->taxControlDevInfo[port].preData[n].timeStamp =pTaxHistoryTotalRecordInfo[k+n].record.timeStamp;
+                                                                                    pTaxControlDevManager->taxControlDevInfo[port].gunSubState[n]= TAX_CONTROL_PROCESS_SUB_STATE_NORMAL;
+                                                                                    dbgPrintf(0,"taxControlDevToPortBinding:Port:%d Gun:%d recovered _Total_",port,n);
+                                                                                    dbgPrintf(0,"[Volume:%d",pTaxControlDevManager->taxControlDevInfo[port].preData[n].totalVolume);
+                                                                                    dbgPrintf(0," Amount:%d]\r\n",pTaxControlDevManager->taxControlDevInfo[port].preData[n].totalAmount);
+                                                                             }                                      
+                                                                     }
+                                                                pTaxControlDevManager->taxControlDevInfo[port].gunBaseNumber = k;    // start sector to store the history _total_data for the guns of this device 
+                                                            }
+                                                        else
+                                                        {
+                                                             dbgPrintf(0,"taxControlDevToPortBinding: But Gun No doesn't match, _total_data was not recovered,k=%d,\r\n",k);
+                                                        }                                                                                               
+                                                                                                                   
+                                                    } 
+                                                else
+                                                    {
+                                                         TaxDevInfo  devInfo;
+                                                         dbgPrintf(0,"taxControlDevToPortBinding: New Tax Control Device founded k=%d\r\n",k);
+                                                         devInfo.head.mark = DIRTY;
+                                                         devInfo.head.type  = 0;
+                                                         devInfo.head.reserved1 = 0;
+                                                         devInfo.head.reserved2 = 0;
+
+                                                         memcpy(devInfo.content.serialNum, pFactoryTaxResp->factorySerialNo,10);
+                                                         devInfo.content.gunNum[0]=0;
+                                                         devInfo.content.gunNum[1]=1;
+                                                         memcpy(devInfo.content.taxerRegNum,TAX_CONTROL_DEVICE_DXYS_DEBUG_TAX_ID,20);
+                                                         memset(devInfo.content.oilGrade,0x0,4);
+
+                                                         // Default to 2016.1.1 00:01
+                                                         devInfo.content.year[0]=0x32;
+                                                         devInfo.content.year[1]=0x30;
+                                                         devInfo.content.year[2]=0x31;
+                                                         devInfo.content.year[3]=0x36;
+
+                                                         devInfo.content.month[0]=0x30;
+                                                         devInfo.content.month[1]=0x31;
+                                                         
+                                                         devInfo.content.day[0]=0x30;
+                                                         devInfo.content.day[1]=0x31;
+                                                         
+                                                         devInfo.content.hour[0]=0x30;
+                                                         devInfo.content.hour[1]=0x30;
+                                                         
+                                                         devInfo.content.minute[0]=0x30;
+                                                         devInfo.content.minute[1]=0x31;
+                                                         devInfo.content.PortNum = port;
+                                                         devInfo.content.timeStamp = 0;
+
+                                                         // Store the new tax device's info into flash   
+                                                         storeTaxDevInfoRecord(&devInfo);
+                                                    }  
+                                                
+                                                pUartPortState[port].bState= PORT_BOUNDED;
+                                                bindingState[port]=TAX_CONTROL_BINDING_STATE_COMPLETE;
+                                                    
+                                            }
+                                        else
+                                            {
+                                                waitCount[port] = 0;
+                                                retryCount[port]++;
+                                                if(retryCount[port] >=3)
+                                                    {
+                                                            dbgPrintf(0,"taxControlDevToPortBinding: Port %d meet 3 times CC/Messagetype error @ NEW state, Stop binding\r\n",port);
+                                                            bindingState[port] = TAX_CONTROL_BINDING_STATE_COMPLETE;                                                                
+                                                    }
+                                                else
+                                                    {
+                                                            waitCount[port] = 0;
+                                                            taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_INFO,0,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+                                                            uartWriteBuffer(port, pCmdBuf,size);
+                                                            uartSendBufferOut(port);
+                                                        
+                                                          bsp_DelayMS(500);
+
+                                                          for(i=0;i<4;i++)
+                                                          {
+                                                            taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_ONCE,i,pCmdBuf,&size,TAX_RESPONSE_RETURN_DISPLAY);
+                                                            uartWriteBuffer(port, pCmdBuf,size);
+                                                            uartSendBufferOut(port);	
+                                                            bsp_DelayMS(500);
+                                                          }   
+                                                          dbgPrintf(0,"taxControlDevToPortBinding: Port %d meet CC/Messagetype error @ NEW state, try more\r\n",port);
+                                                    }
+                                            }
+                                      }
+                																		
+                																				
+                			}
+                            else
+                                {
+                                    if(waitCount[port]>=2)
+                                        {
+                                            retryCount[port]++;
+                                            waitCount[port] = 0;
+                                            if(retryCount[port] >=3)
+                                                {
+                                                        dbgPrintf(0,"taxControlDevToPortBinding: Busy 3 times @ NEW state, Stop binding this port and device\r\n",port);
+                                                        bindingState[port]= TAX_CONTROL_BINDING_STATE_COMPLETE;
+                                                }
+                                            else
+                                                {
+                                                        waitCount[port] = 0;
+                                                        taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_INFO,0,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+                                                        uartWriteBuffer(port, pCmdBuf,size);
+                                                        uartSendBufferOut(port);
+                                                    
+                                                         bsp_DelayMS(500);
+                                                         
+                                                         for(i=0;i<4;i++)
+                                                          {
+                                                             taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_ONCE,i,pCmdBuf,&size,TAX_RESPONSE_RETURN_DISPLAY);
+                                                             uartWriteBuffer(port, pCmdBuf,size);
+                                                             uartSendBufferOut(port);	
+                                                             bsp_DelayMS(500);  
+                                                          }    			
+                                                
+                                                        dbgPrintf(0,"taxControlDevToPortBinding: Busy @ NEW state, Port %d will try more within NEW state\r\n",port);                                                        
+                                                }
+                                        }
+                                }                                
+                           }
+                       break;
+
+                       case    TAX_CONTROL_BINDING_STATE_COMPLETE:
+                       break;    
+                     }            
+               }
+          bsp_DelayMS(1500);
+       }        
+
+     // Need balance how to allocate history_total_data sector allocations
+     AllocateTaxDeviceTotalStorageOffset(pTaxControlDevManager);
+
+     dbgPrintf(0,"taxControlDevToPortBinding: dev0 gunbase:%d  dev1 gunbase:%d\r\n",pTaxControlDevManager->taxControlDevInfo[0].gunBaseNumber,pTaxControlDevManager->taxControlDevInfo[1].gunBaseNumber);
+     dbgPrintf(0,"Binding Result:  UART0: %d   UART1:%d\r\n",pUartPortState[0].bState,pUartPortState[1].bState);
+     return E_SUCCESS;
+
+}
+
+/*******************************************************************************************************************************
+Function Name:
+Description:
+    This task should be called in main task loop to detect the uart port connecting status, do rebinding if
+    1. Previously connected but unbounded
+    2. reconnect
+Parameter:
+    NULL
+Return:
+    E_SUCCESS: always.    
+*******************************************************************************************************************************/
+errorCode   taxPortConnectingDetectAndRebindTask()
+{
+    UartPortState *prevState;
+    UartPortState currentState[UART_TAX_PORT_NUM]={0};
+    int port,dev;
+    unsigned char toBindFlag[UART_TAX_PORT_NUM]={0};
+    TaxControlDevManager *pDevMgr = &taxControlDevManager;
+    uartConnectionDetect(currentState);
+    prevState = uartGetPortState();
+		
+    for(port=0;port<UART_TAX_PORT_NUM;port++)
+        {
+            if(currentState[port].cState == CONNECTION_STATE_CONNECT)       // currently connected
+                {
+                    if(prevState[port].cState != CONNECTION_STATE_CONNECT)  // previously not connected, absolutely need rebind
+                        {
+                            toBindFlag[port] = 1;
+                            prevState[port].cState = CONNECTION_STATE_CONNECT;
+                        }
+                    else if((prevState[port].cState == CONNECTION_STATE_CONNECT) &&(prevState[port].bState == PORT_UNBOUND))  // previously connected too, but not bounded, absolutely need rebind
+                        {
+                            toBindFlag[port] = 1;
+                        }
+                }
+            else    // currently not connected. we need mark it unbound now.
+                {
+                    prevState[port].cState = CONNECTION_STATE_INIT;
+                    prevState[port].bState = PORT_UNBOUND;
+                    for(dev=0;dev<TAX_CONTROL_DEVICE_MAX_NUM;dev++)
+                        {
+                            if((pDevMgr->taxControlDevInfo[dev].bind == TAX_CONTROL_DEVICE_BOUND) && (pDevMgr->taxControlDevInfo[dev].port == port))
+                                pDevMgr->taxControlDevInfo[dev].bind = TAX_CONTROL_DEVICE_UNBOUND;
+                        }
+                }
+        }
+
+    if(toBindFlag[0] || toBindFlag[1])
+        {
+            retrieveTotalHistoryRecord();      
+        }
+    
+    if(toBindFlag[0] && toBindFlag[1])
+        {
+            taxControlDevToPortBinding(TAX_CONTROL_DEV_BINDING_REQ_TOTAL);
+            dbgPrintf(0,"taxPortConnectingDetectAndRebindTask: Bind both Port0 and Port1 finished\r\n");
+        }
+    else
+        {
+            if(toBindFlag[0])
+                {
+                    taxControlDevToPortBinding(TAX_CONTROL_DEV_BINDING_REQ_PORT0);
+                    dbgPrintf(0,"taxPortConnectingDetectAndRebindTask: Bind Port0 finished\r\n");                    
+                }
+            else if(toBindFlag[1])
+                {
+                    taxControlDevToPortBinding(TAX_CONTROL_DEV_BINDING_REQ_PORT1);
+                    dbgPrintf(0,"taxPortConnectingDetectAndRebindTask: Bind Port1 finished\r\n");                    
+                }
+        }
+    
+    return E_SUCCESS;
+}
+/*******************************************************************************************************************************
+Function Name: taxControlDevSamplingOnInit
+Description:
+      If local RTC clock has synced w/ GTC, then change the current device to "IDLE" state which can start polling transaction info. if clock not synced, then 
+still stay in "INIT" state.
+
+Parameter:
+	pDev:[I/O], ponits to device infomation structure.
+	clkState:[I], local clock sync state
+Return:
+	E_SUCCESS: Always successfully
+*******************************************************************************************************************************/
+static errorCode taxControlDevSamplingOnInit(TaxControlDevInfo *pDev, ClockSyncState clkState)
+{
+    unsigned char buf[128];
+    if(clkState == CLOCK_GTC)
+        {
+            unsigned short availBytes;
+            availBytes = uartGetAvailBufferedDataNum(pDev->port);
+            if(availBytes > 0)
+                {
+                    if(availBytes > 128)
+                        uartRead(pDev->port,buf, 128);
+                    else
+                        uartRead(pDev->port,buf, availBytes);
+                }   
+            pDev->sampleState = TAX_CONTROL_SAMPLING_STATE_IDLE;
+        }
+    
+    return E_SUCCESS;
+}
+/*******************************************************************************************************************************
+Function Name: taxControlSamplingOnIdle
+Description:
+      Start the new loop polling. Request  "TAX_CONTROL_CMD_QUERY_TOTAL" Response, clear all the counts and set the state to the next one "TAX_CONTROL_
+CMD_TRACE_STATE_QUERY1".
+Parameter:
+	pDev:[I], points to device infomation structure
+Return:
+	E_SUCCESS: when complete successfully
+*******************************************************************************************************************************/
+static errorCode taxControlDevSamplingOnIdle(TaxControlDevInfo *pDev)
+{
+	errorCode error=E_SUCCESS;
+	unsigned char pCmdBuf[64];
+	unsigned short size;
+    //wawe 2016-11-2 12:05:07
+    
+    switch(pDev->curCmd)
+    {
+       case TAX_CONTROL_CMD_QUERY_TOTAL:
+       {
+        size = sizeof(TaxTotalQueryCmd);
+        // Send commnad to TaxControlDevice to query current gun's "total" information.
+        error=taxControlCmdCreate(pDev->curCmd,pDev->gunCurrent,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+        error=uartWriteBuffer(pDev->port, pCmdBuf,size);
+        error=uartSendBufferOut(pDev->port); 
+        pDev->statistic[pDev->gunCurrent].totalTryCount++;
+       }
+       break;
+       
+       case TAX_CONTROL_CMD_QUERY_MONTH:
+       {
+        size = sizeof(TaxMonthlyQueryCmd);
+        error=taxControlCmdCreate(pDev->curCmd,pDev->gunCurrent,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+        error=uartWriteBuffer(pDev->port, pCmdBuf,size);
+        error=uartSendBufferOut(pDev->port);        
+           
+       }
+       break;
+       
+//       case TAX_CONTROL_CMD_QUERY_ONCE:
+//       {
+//        size = sizeof(TaxOnceQueryCmd);
+//        // Send commnad to TaxControlDevice to query current gun's "total" information.
+//        error=taxControlCmdCreate(pDev->curCmd,pDev->gunCurrent,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+//        error=uartWriteBuffer(pDev->port, pCmdBuf,size);
+//        error=uartSendBufferOut(pDev->port);
+//           
+//       }
+//       break;
+    }
+	
+
+	return error;				
+}
+/*******************************************************************************************************************************
+Function Name: taxControlDevSamplingOnProcessing
+Description:
+      Process the "total" transaction information, store to the flash, else change to BUSY state if timeout or turn to CONFIRM state once need query price. 
+Parameter:
+	pDev:[I], points to device infomation structure
+Return:
+	E_SUCCESS: when complete successfully.
+	E_AMBIGUITY: Can't calculate gasoline price, need further processing.
+	E_CHECK_CODE: Check code error.
+	E_MESSAGE_TYPE: Got unexpected data message
+	E_WAITING: Still need wait for device's response.
+	E_DEVICE_BUSY: Device is busy, can't repsonce within TIMEOUT
+	E_GUN_INITIALIZING:  Device's current gun's data is not initialized yet 
+	E_FAIL:  Total wrong, need restart sampling.
+	E_WAIT_COFIRM: Need query again to double confirm
+*******************************************************************************************************************************/
+static errorCode taxControlDevSamplingOnProcessing(TaxControlDevInfo *pDev)
+{
+	errorCode error=E_SUCCESS;
+	TaxTotalQueryResp *pTotalResp;
+	unsigned char pCmdBuf[64];
+	unsigned char pRespBuf[128];
+	unsigned char availBytes=0;
+	unsigned short size=0;
+	unsigned char cc=0x00;
+	unsigned char i;
+    int price;
+    TaxOnceTransactionRecord record;  
+
+	if(pDev == 0) return E_INPUT_PARA;
+
+	availBytes = uartGetAvailBufferedDataNum(pDev->port);
+	if(availBytes >= sizeof(TaxTotalQueryResp))	// Got expected # of bytes, need parse them
+	{
+		taxControlResponseRetriever(pDev->port,pRespBuf,availBytes);
+		pTotalResp = (TaxTotalQueryResp *)pRespBuf;
+		if(pTotalResp->header.cmd == pDev->curCmd)
+		{
+            for(i=2;i<sizeof(TaxTotalQueryResp)-1;i++)
+                cc = cc ^ pRespBuf[i];
+            
+            if(cc == pTotalResp->cc)
+            {
+                unsigned char t[13];
+                long long diffV=0;
+                long long diffA=0;
+                long long minorVol;
+                long long thisV,thisA;
+                unsigned currentTick= getLocalTick();
+
+             // Covert "volume" and "amount" from "ASCII" to "long long" to get thisV and thisA for judgement
+                t[12]=0;
+                memcpy(t,pTotalResp->volume,12);
+                thisV =atoll(t);
+
+                t[12]=0;
+                memcpy(t,pTotalResp->amount,12);
+                thisA=atoll(t);
+
+
+                switch (pDev->gunSubState[pDev->gunCurrent])
+                {
+                                // This case make sure that each gun's 1st _total_data_confirmed 3 times to have confidence that it is correct.
+                    case    TAX_CONTROL_PROCESS_SUB_STATE_INIT:
+                    {
+                         if(pDev->gunRepeatCount == 0xff)
+                         {
+                            pDev->preData[pDev->gunCurrent].totalVolume  = thisV;
+                            pDev->preData[pDev->gunCurrent].totalAmount = thisA;
+                            pDev->preData[pDev->gunCurrent].timeStamp = currentTick;
+                            pDev->gunRepeatCount++;
+                            dbgPrintf(0,"taxControlDevSamplingOnProcessing: Port:%d Gun:%d Initializing Start: %d\r\n",pDev->port,pDev->gunCurrent,pDev->gunRepeatCount);
+                            
+                            return E_GUN_INITIALIZE;
+                          }
+                          else
+                          {
+                            if(pDev->gunRepeatCount < (TAX_GUN_DATA_INITIALIZE_TIME -1))
+                             {
+                                if(thisV ==pDev->preData[pDev->gunCurrent].totalVolume)
+                                {
+                                    pDev->gunRepeatCount++;
+                                    //dbgPrintf(0,"taxControlDevSamplingOnProcessing: Port:%d Gun:%d Initializing Continue: %d\r\n",pDev->port,pDev->gunCurrent,pDev->gunRepeatCount);
+                                    return  E_GUN_INITIALIZE;
+                                }
+                                else
+                                {
+                                    pDev->preData[pDev->gunCurrent].totalVolume = thisV;
+                                    pDev->preData[pDev->gunCurrent].totalAmount = thisA;
+                                    pDev->preData[pDev->gunCurrent].timeStamp = currentTick;
+                                    pDev->gunRepeatCount = 0;
+                                    dbgPrintf(0,"taxControlDevSamplingOnProcessing: Port:%d Gun:%d Initializing Restart: %d\r\n",pDev->port,pDev->gunCurrent,pDev->gunRepeatCount);
+                                    
+                                    return E_GUN_INITIALIZE;
+                                }
+                             }
+                            else
+                             {
+                                    pDev->gunRepeatCount = 0xff;
+                                    pDev->gunSubState[pDev->gunCurrent] = TAX_CONTROL_PROCESS_SUB_STATE_NORMAL;
+
+                                    storeTotalHistoryRecord(pDev->port, pDev->gunCurrent, pDev->gunBaseNumber, thisV, thisA, pDev->serialID, pDev->taxUniqueID);
+                                    
+                                    dbgPrintf(0,"taxControlDevSamplingOnProcessing: [INIT] Port:%d Gun:%d Intializing Complete,Total Data[",pDev->port,pDev->gunCurrent);
+                                    dbgPrintf(0,"Volume:%d  ",thisV);
+                                    dbgPrintf(0,"Amount:%d ]\r\n",thisA);
+                                    
+                                    return E_SUCCESS;
+                             }                                                                
+                           }                                                                    
+                        }
+                    break;
+
+                case    TAX_CONTROL_PROCESS_SUB_STATE_NORMAL:
+                    {
+                        if(pDev->gunTotal == 1)     // One_Gun's tax control device doesn't have gun ambiguity issue, directly store the current transaction
+                            {
+                                diffV = thisV-pDev->preData[pDev->gunCurrent].totalVolume;
+                                diffA = thisA-pDev->preData[pDev->gunCurrent].totalAmount;
+
+                                // Same as previous, drop it.
+                                if(diffV == 0LL)
+                                {
+                                    return E_SUCCESS;
+                                }
+                                else if(diffV < 0LL)    // Smaller than previous one, something crash, reset system 
+                                {                                                                            
+                                     dbgPrintf(0,"!!!!taxControlDevSamplingOnProcessing: Port:%d Gun:%d Single gun, this _total_data_ < previous _total_data_\r\n",pDev->port,pDev->gunCurrent);
+                                     return E_FAIL;
+                                 }
+                                else
+                                    {
+                                        pDev->dataStore[pDev->gunCurrent].totalVolume = thisV;
+                                        pDev->dataStore[pDev->gunCurrent].totalAmount = thisA;
+                                        pDev->dataStore[pDev->gunCurrent].timeStamp = currentTick;
+                                        goto final_decision;
+                                    }                                                                        
+                            }
+                           else if(pDev->gunTotal == 2)     // Two_Guns tax control deivce has ambiguity issues, deploy simple decision
+                            {
+                                pDev->dataStore[pDev->gunCurrent].totalVolume = thisV;
+                                pDev->dataStore[pDev->gunCurrent].totalAmount = thisA;
+                                pDev->dataStore[pDev->gunCurrent].timeStamp = currentTick;
+
+                                diffV = thisV-pDev->preData[pDev->gunCurrent].totalVolume;
+                                diffA = thisA-pDev->preData[pDev->gunCurrent].totalAmount;
+
+                                minorVol = MIN(pDev->preData[0].totalVolume,pDev->preData[1].totalVolume);
+                                
+                                // Sn < MINOR(S0,S1)
+                                if(thisV < minorVol)
+                                    {
+                                        dbgPrintf(0,"!!!! taxControlDevSamplingOnProcessing: Port:%d Gun:%d The _total_data_ is smaller than both previous data, Drop!\r\n",pDev->port,pDev->gunCurrent);
+                                        return E_FAIL;
+                                    }
+
+                                // Good, Sn= Spre_this
+                                if(thisV == pDev->preData[pDev->gunCurrent].totalVolume)
+                                    {
+                                        return E_SUCCESS;
+                                    }
+
+                                // a little ambiguious, need confirm
+                                if(thisV == pDev->preData[OPPPSITE(pDev->gunCurrent)].totalVolume)
+                                {
+                                    dbgPrintf(0,"!!!! taxControlDevSamplingOnProcessing: Port:%d Gun:%d The _total_data_ is same the opposite, Need confirm\r\n",pDev->port,pDev->gunCurrent);
+                                    pDev->gunSubState[pDev->gunCurrent] = TAX_CONTROL_PROCESS_SUB_STATE_PEND;
+                                    return E_WAIT_CONFIRM;
+                                }
+                                
+                               
+                                   //  S(this)< Sn < S(opposite)    Good
+                                if(thisV > pDev->preData[pDev->gunCurrent].totalVolume && thisV < pDev->preData[OPPPSITE(pDev->gunCurrent)].totalVolume)
+                                {
+                                    goto final_decision;
+                                }
+
+                                    // S(opposite) < Sn < S(this)  
+                                if(thisV > pDev->preData[OPPPSITE(pDev->gunCurrent)].totalVolume && thisV < pDev->preData[pDev->gunCurrent].totalVolume)
+                                {
+                                    dbgPrintf(0,"!!!! taxControlDevSamplingOnProcessing: Port:%d Gun:%d The _total_data_  < this  >opposite,Need confirm\r\n",pDev->port,pDev->gunCurrent);
+                                    return E_FAIL;
+                                }
+
+                                    // A little bad, need check speed.
+                                if(thisV > MAX(pDev->preData[0].totalVolume,pDev->preData[1].totalVolume))
+                                {
+                                    long long maxVol[2];
+                                    unsigned char targetGun;
+                                    // Maxium speed: Here set 90L/minute 
+                                    maxVol[0] = (getLocalTick() - pDev->preData[0].timeStamp) * TAX_CONTROL_GUN_MAX_SPEED;
+                                    maxVol[1] = (getLocalTick() - pDev->preData[1].timeStamp) * TAX_CONTROL_GUN_MAX_SPEED;            
+
+                                    if(diffV >= MAX(maxVol[0],maxVol[1]))
+                                    {
+                                        dbgPrintf(0,"!!!!taxControlDevSamplingOnProcessing: Port:%d Gun:%d @%x Speed is bigger than limit on both gun\r\n",pDev->port,pDev->gunCurrent,getSysTick());                                                                    
+                                        return E_FAIL;
+                                    }
+                                    else if(diffV > maxVol[0] && diffV <= maxVol[1])
+                                    {
+                                        if(pDev->gunCurrent == 1)
+                                            {
+                                                //dbgPrintf(0,"!!!!taxControlDevSamplingOnProcessing: Port:%d Gun:%d @%x Speed judge OK\r\n",pDev->port,pDev->gunCurrent,getSysTick());                                                                    
+                                                goto final_decision;
+                                            }
+                                        else
+                                            {
+                                                dbgPrintf(0,"!!!!taxControlDevSamplingOnProcessing: Port:%d Gun:%x @%d Speed judge NG\r\n",pDev->port,pDev->gunCurrent,getSysTick());                                                                            
+                                                return E_FAIL;
+                                            }
+                                    }
+                                    else if(diffV > maxVol[1] && diffV <= maxVol[0])
+                                    {
+                                        if(pDev->gunCurrent == 0)
+                                            {
+                                                //dbgPrintf(0,"!!!!taxControlDevSamplingOnProcessing: Port:%d Gun:%d @%x Speed judge OK\r\n",pDev->port,pDev->gunCurrent,getSysTick());                                                                                                                                                
+                                                goto final_decision;
+                                            }
+                                        else
+                                            {
+                                                dbgPrintf(0,"!!!!taxControlDevSamplingOnProcessing: Port:%d Gun:%d @%x Speed judge NG\r\n",pDev->port,pDev->gunCurrent,getSysTick());                                                                            
+                                                return E_FAIL;
+                                             }
+                                    }
+                                    else
+                                    {
+                                        dbgPrintf(0,"!!!!taxControlDevSamplingOnProcessing: Port:%d Gun:%d @%x Can't judge by Simple judgemeb, Query again\r\n",pDev->port,pDev->gunCurrent,getSysTick());
+                                        // Send query command again and change the substate to "pending"
+                                        error=taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_TOTAL,pDev->gunCurrent,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+                                        error=uartWriteBuffer(pDev->port, pCmdBuf,size);
+                                        error=uartSendBufferOut(pDev->port);
+
+                                        pDev->gunSubState[pDev->gunCurrent] = TAX_CONTROL_PROCESS_SUB_STATE_PEND;
+                                        return E_WAIT_CONFIRM;
+                                    }
+                    
+                                 }
+
+                             }
+                            else    // For 3 and 3 more gun's tax control, we need doube confirm the _total_data by reading it next time
+                            {
+                                pDev->dataStore[pDev->gunCurrent].totalVolume = thisV;
+                                pDev->dataStore[pDev->gunCurrent].totalAmount = thisA;
+                                pDev->dataStore[pDev->gunCurrent].timeStamp = currentTick;                                                                        
+
+                                // Send query command again and change the substate to "pending"
+                                error=taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_TOTAL,pDev->gunCurrent,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+                                error=uartWriteBuffer(pDev->port, pCmdBuf,size);
+                                error=uartSendBufferOut(pDev->port);
+                                
+                                pDev->gunSubState[pDev->gunCurrent] = TAX_CONTROL_PROCESS_SUB_STATE_PEND;
+                                dbgPrintf(0,"taxControlDevSamplingOnProcessing:  Port:%d Gun:%d Got 1st _total_data_, Need confirm\r\n",pDev->port,pDev->gunCurrent);
+                                return E_WAIT_CONFIRM;
+                            }
+final_decision:                                                
+                                                                
+                        {
+                            LocalTimeStamp ltm;
+                            unsigned char tt[7];
+
+                            pDev->gunSubState[pDev->gunCurrent] = TAX_CONTROL_PROCESS_SUB_STATE_NORMAL;
+
+                            // We got a new "total", we need store them into flash whatever need query price or not
+                            storeTotalHistoryRecord(pDev->port, pDev->gunCurrent, pDev->gunBaseNumber,
+                                                                     pDev->dataStore[pDev->gunCurrent].totalVolume,pDev->dataStore[pDev->gunCurrent].totalAmount,pDev->serialID, pDev->taxUniqueID);
+                            
+                            dbgPrintf(0,"$$$$ [NORMAL] Port:%d  Gun:%d Store New Total data into flash\r\n",pDev->port,pDev->gunCurrent);
+                            dbgPrintf(0,"$$$$ [NORMAL] New Total Volume:%d\r\n",pDev->dataStore[pDev->gunCurrent].totalVolume);
+                            dbgPrintf(0,"$$$$ [NORMAL] New Total Amount:%d\r\n",pDev->dataStore[pDev->gunCurrent].totalAmount);
+                            dbgPrintf(0,"$$$$ [NORMAL] Pre Total Volume:%d\r\n",pDev->preData[pDev->gunCurrent].totalVolume);
+                            dbgPrintf(0,"$$$$ [NORMAL] Pre Total Amount:%d\r\n",pDev->preData[pDev->gunCurrent].totalAmount);
+                            dbgPrintf(0,"$$$$ [NORMAL] This Volume:%d\r\n",diffV);
+                            dbgPrintf(0,"$$$$ [NORMAL] This Amount:%d\r\n",diffA);
+                            dbgPrintf(0,"$$$$ [NORMAL] TimeStamp:%d\r\n",pDev->dataStore[pDev->gunCurrent].timeStamp);
+                            
+                            price=taxControlPriceJudegmenet((float)diffV,(float)diffA);
+
+                            if(price > 0)
+                            {
+                                pDev->preData[pDev->gunCurrent].totalVolume  = pDev->dataStore[pDev->gunCurrent].totalVolume;
+                                pDev->preData[pDev->gunCurrent].totalAmount  =pDev->dataStore[pDev->gunCurrent].totalAmount;
+                                pDev->preData[pDev->gunCurrent].timeStamp = pDev->dataStore[pDev->gunCurrent].timeStamp;
+
+                                dbgPrintf(0,"$$$$taxControlDevSamplingOnProcessing: Fine! Port:%d Gun:%d got Volume:%d,Final.\r\n",pDev->port,pDev->gunCurrent,diffV);
+
+                                memset(&record,0xff,sizeof(TaxOnceTransactionRecord));
+                                record.head.mark= DIRTY;                          // make it dirty after write to flash, read function will make it done
+                                record.content.gunNo = (pDev->gunCurrent << 8) + pDev->port;    // This gun #   
+
+                                record.content.timeStamp= pDev->dataStore[pDev->gunCurrent].timeStamp;
+                                memcpy(record.content.factorySerialNo,pDev->serialID,10);   // FactoryID
+
+                                getLocalFormatedTime(record.content.timeStamp,&ltm);
+                                memcpy(record.content.date,ltm.date,2);    // Date
+                                memcpy(record.content.hour,ltm.hour,2);    // Hour
+                                memcpy(record.content.minute,ltm.minute,2);    // Minute
+                                 
+                                sprintf(tt,"%06d",diffV);                   // This volume
+                                memcpy(record.content.volume,tt,6);
+                                 
+                                 //itoa(aa,(int)diffA,10);
+                                sprintf(tt,"%06d",diffA);                   // This amount
+                                memcpy(record.content.amount,tt,6);
+
+                                sprintf(tt,"%04d",price);
+                                memcpy(record.content.price,tt,4);
+                                
+                                memcpy(record.content.Totalvolume,pTotalResp->volume,12);//本次总类加油量存入
+                                memcpy(record.content.Totalamount,pTotalResp->amount,12);//本次总类金额存入
+
+                                storeTransactionRecord(&record);
+
+                                pDev->statistic[pDev->gunCurrent].successCount++;
+                                 return E_SUCCESS;
+                            }
+                            else    // Need query price to double confirm
+                            {
+                                dbgPrintf(0,"$$$$taxControlDevSamplingOnProcessing: [NORMAL] Still Need Query Price\r\n");
+                                pDev->confirmState = TAX_CONTROL_CONFIRM_SUB_STATE_INIT;
+                                    
+                                error=taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_ONCE,pDev->gunCurrent,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+                                error=uartWriteBuffer(pDev->port, pCmdBuf,size);
+                                error=uartSendBufferOut(pDev->port);
+
+                                return E_AMBIGUITY;
+                            }
+                        }
+
+                }
+            break;
+
+            case    TAX_CONTROL_PROCESS_SUB_STATE_PEND:
+                {                                                              
+                    if(thisV == pDev->dataStore[pDev->gunCurrent].totalVolume)  // Cofirmed, we got continious 2 same _total_data
+                    {
+                        LocalTimeStamp ltm;
+                        unsigned char tt[7];
+
+                        diffV = thisV - pDev->preData[pDev->gunCurrent].totalVolume;
+                        diffA = thisA - pDev->preData[pDev->gunCurrent].totalAmount;
+                                                                                                      
+                        pDev->gunSubState[pDev->gunCurrent] = TAX_CONTROL_PROCESS_SUB_STATE_NORMAL;
+                        
+                        if(diffV==0)
+                           return E_SUCCESS;    
+
+                        // We got a new "total", we need store them into flash whatever need query price or not
+                        storeTotalHistoryRecord(pDev->port, pDev->gunCurrent, pDev->gunBaseNumber,
+                                                                 pDev->dataStore[pDev->gunCurrent].totalVolume,pDev->dataStore[pDev->gunCurrent].totalAmount,pDev->serialID, pDev->taxUniqueID);
+                        
+                        dbgPrintf(0,"$$$$ [PEND] Port:%d  Gun:%d Store New Total data into flash\r\n",pDev->port,pDev->gunCurrent);
+                        dbgPrintf(0,"$$$$ [PEND] New Total Volume:%d\r\n",pDev->dataStore[pDev->gunCurrent].totalVolume);
+                        dbgPrintf(0,"$$$$ [PEND] New Total Amount:%d\r\n",pDev->dataStore[pDev->gunCurrent].totalAmount);
+                        dbgPrintf(0,"$$$$ [PEND] Pre Total Volume:%d\r\n",pDev->preData[pDev->gunCurrent].totalVolume);
+                        dbgPrintf(0,"$$$$ [PEND] Pre Total Amount:%d\r\n",pDev->preData[pDev->gunCurrent].totalAmount);
+                        dbgPrintf(0,"$$$$ [PEND] This Volume:%d\r\n",diffV);
+                        dbgPrintf(0,"$$$$ [PEND] This Amount:%d\r\n",diffA);
+                        dbgPrintf(0,"$$$$ [PEND] TimeStamp:%d\r\n",pDev->dataStore[pDev->gunCurrent].timeStamp);
+                        
+                        price=taxControlPriceJudegmenet((float)diffV,(float)diffA);
+
+                        if(price > 0)
+                        {
+                            pDev->preData[pDev->gunCurrent].totalVolume  = pDev->dataStore[pDev->gunCurrent].totalVolume;
+                            pDev->preData[pDev->gunCurrent].totalAmount  =pDev->dataStore[pDev->gunCurrent].totalAmount;
+                            pDev->preData[pDev->gunCurrent].timeStamp = pDev->dataStore[pDev->gunCurrent].timeStamp;
+
+
+                            memset(&record,0xff,sizeof(TaxOnceTransactionRecord));
+                            record.head.mark= DIRTY;                          // make it dirty after write to flash, read function will make it done
+                         //   record.head.type= 0;                                 // data type
+                            record.content.gunNo = (pDev->gunCurrent << 8) + pDev->port;    // This gun #   
+
+                            record.content.timeStamp= pDev->dataStore[pDev->gunCurrent].timeStamp;
+                            memcpy(record.content.factorySerialNo,pDev->serialID,10);   // FactoryID
+
+                            getLocalFormatedTime(record.content.timeStamp,&ltm);
+                            memcpy(record.content.date,ltm.date,2);    // Date
+                            memcpy(record.content.hour,ltm.hour,2);    // Hour
+                            memcpy(record.content.minute,ltm.minute,2);    // Minute
+                             
+                            sprintf(tt,"%06d",diffV);                   // This volume
+                            memcpy(record.content.volume,tt,6);
+                             
+                             //itoa(aa,(int)diffA,10);
+                            sprintf(tt,"%06d",diffA);                   // This amount
+                            memcpy(record.content.amount,tt,6);
+
+                            sprintf(tt,"%04d",price);
+                            memcpy(record.content.price,tt,4);
+                            
+                            memcpy(record.content.Totalvolume,pTotalResp->volume,12);//本次总类加油量存入
+                            memcpy(record.content.Totalamount,pTotalResp->amount,12);//本次总类金额存入
+
+                            storeTransactionRecord(&record);
+                            pDev->statistic[pDev->gunCurrent].successCount++;                                                
+                             return E_SUCCESS;
+                        }
+                        else    // Need query price to double confirm
+                        {
+                            dbgPrintf(0,"$$$$taxControlDevSamplingOnProcessing: [PEND] Still Need Query Price\r\n");
+                            pDev->confirmState = TAX_CONTROL_CONFIRM_SUB_STATE_INIT;
+                                
+                            error=taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_ONCE,pDev->gunCurrent,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+                            error=uartWriteBuffer(pDev->port, pCmdBuf,size);
+                            error=uartSendBufferOut(pDev->port);
+
+                            return E_AMBIGUITY;
+                        }
+
+                       return  E_SUCCESS;
+                    }
+                    else        // No, we got 2 continious different _total_data, need reconfirm again
+                    {
+                        pDev->dataStore[pDev->gunCurrent].totalVolume = thisV;
+                        pDev->dataStore[pDev->gunCurrent].totalAmount = thisA;
+                        pDev->dataStore[pDev->gunCurrent].timeStamp = currentTick;
+                        error=taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_TOTAL,pDev->gunCurrent,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+                        error=uartWriteBuffer(pDev->port, pCmdBuf,size);
+                        error=uartSendBufferOut(pDev->port);
+                        return E_WAIT_CONFIRM;
+                    }                                                    
+                    
+                }
+                break;
+
+                    default:
+                    {
+                        while(1)
+                        {
+                            dbgPrintf(0,"taxControlDevSamplingOnProcessing: Port:%d Gun:%d  SubState is totaly wrong\r\n");
+                        }   
+                    }
+                    break;
+               }                                                    
+            }
+            else		//checksum error, restart the loop. 
+            {
+                return E_CHECK_CODE;			
+
+            }
+	   }
+       else
+       {		
+            return E_MESSAGE_TYPE;			
+       }
+    }
+	else
+	{
+		        // Incrment the cmdWaitCount
+        if(pDev->stateCount<= TAX_CONTROL_CMD_WAIT_TIMEOUT)	       // Not reach timeout, need wait more.
+            {
+                return E_DEVICE_BUSY;
+            }
+        else		// Wait 3 seconds, doesn't get any response, seems taxControlDevice is busy, change state to Idle,  restart polling loop.
+            {
+                if(availBytes > 0)
+                    uartEmptyRcvBuffer(pDev->port);
+                
+                   error=taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_TOTAL,pDev->gunCurrent,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+                   error=uartWriteBuffer(pDev->port, pCmdBuf,size);
+                   error=uartSendBufferOut(pDev->port);
+
+                return E_DEVICE_BUSY;
+            }
+	}
+
+	return E_SUCCESS;
+}
+
+/*******************************************************************************************************************************
+Function Name: taxControlDevSamplingOnConfirm
+Description:
+      This function processes "price" response message. 
+Parameter:
+	pDev:[I], points to device infomation structure
+Return:
+	E_SUCCESS: when complete successfully.
+	E_CHECK_CODE: Check code error.
+	E_MESSAGE_TYPE: Got unexpected data message
+	E_WAITING: Still need wait for device's response.
+	E_DEVICE_BUSY: Device is busy, can't repsonce within TIMEOUT	
+*******************************************************************************************************************************/
+static errorCode taxControlDevSamplingOnConfirm(TaxControlDevInfo *pDev)
+{
+	TaxOnceQueryResp *ptaxOnceResp;
+	errorCode error=E_SUCCESS;
+	unsigned short size=0;
+	unsigned char pCmdBuf[64];
+	unsigned char pRespBuf[128];
+	unsigned char availBytes=0;
+	unsigned char cc=0x00;
+	unsigned char i,checkcode;
+    
+    TaxOnceTransactionRecord record;  
+   
+	availBytes = uartGetAvailBufferedDataNum(pDev->port);
+	if(availBytes >= sizeof(TaxOnceQueryResp))	// Got expected # of bytes, need parse them.
+	{
+        taxControlResponseRetriever(pDev->port,pRespBuf,availBytes);
+       
+        ptaxOnceResp = (TaxOnceQueryResp *)pRespBuf;
+        
+        checkcode=*(pRespBuf+ptaxOnceResp->header.length+1);
+              
+               
+        for(i=0;i<ptaxOnceResp->header.length-1;i++)
+              cc = cc ^ pRespBuf[i+2];
+        
+		ptaxOnceResp->cc=checkcode;
+        
+		if(ptaxOnceResp->header.cmd == pDev->curCmd)    // && (cc == ptaxOnceResp->cc))
+		{
+            if(cc == ptaxOnceResp->cc)
+            {            
+                long long diffV=0;
+                long long diffA=0;
+                LocalTimeStamp ltm;
+                unsigned char tt[7]={0};
+                unsigned char ss[13]={0};
+                switch (pDev->confirmState)
+                {
+                    case TAX_CONTROL_CONFIRM_SUB_STATE_INIT:
+                     {
+                        //dbgPrintf(0,"taxControlDevSamplingOnConfirm: Port:%d Gun:%d Got the price 1st time\r\n",pDev->port,pDev->gunCurrent);
+                        memcpy(pDev->prePrice,ptaxOnceResp->price,4);
+                        pDev->confirmState = TAX_CONTROL_CONFIRM_SUB_STATE_CONFIRM;
+
+                        size = sizeof(TaxOnceQueryCmd);
+                        error=taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_ONCE,pDev->gunCurrent,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+                        error=uartWriteBuffer(pDev->port, pCmdBuf,size);
+                        error=uartSendBufferOut(pDev->port);
+                        return E_WAIT_CONFIRM;	                                                 
+                      }
+                      break;
+
+                     case TAX_CONTROL_CONFIRM_SUB_STATE_CONFIRM:    
+                      {
+                           if(memcmp(pDev->prePrice,ptaxOnceResp->price,4))   // Not same as previous queried price, need confirm again
+                            {
+                                    //dbgPrintf(0,"taxControlDevSamplingOnConfirm: Port:%d Gun:%d Got the price 2nd time, but not same, reconfim\r\n",pDev->port,pDev->gunCurrent);
+
+                                memcpy(pDev->prePrice,ptaxOnceResp->price,4);
+                                size = sizeof(TaxOnceQueryCmd);
+                                 error=taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_ONCE,pDev->gunCurrent,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+                                 error=uartWriteBuffer(pDev->port, pCmdBuf,size);
+                                 error=uartSendBufferOut(pDev->port);
+                                 return E_WAIT_CONFIRM;                                                       
+                            }
+                             else   // We got the same 2 continuous price, we have confidence that the price is correct, save the record to flash for uploading
+                            {                                                    
+                                // Whatever recover the substate to the initial state
+                                pDev->confirmState = TAX_CONTROL_CONFIRM_SUB_STATE_INIT;             
+
+                                diffV = pDev->dataStore[pDev->gunCurrent].totalVolume - pDev->preData[pDev->gunCurrent].totalVolume;
+                                diffA = pDev->dataStore[pDev->gunCurrent].totalAmount-pDev->preData[pDev->gunCurrent].totalAmount;
+                                
+                                dbgPrintf(0,"$$$$[Confirm] Successfully sampled a record: Port:%d Gun:%d\r\n ",pDev->port,pDev->gunCurrent);
+                                dbgPrintf(0,"$$$$[Confirm] Pre Total Volume:%d\r\n",pDev->preData[pDev->gunCurrent].totalVolume);
+                                dbgPrintf(0,"$$$$[Confirm] Pre Total Amount:%d\r\n",pDev->preData[pDev->gunCurrent].totalAmount);                                                       
+                                dbgPrintf(0,"$$$$[Confirm] New Total Volume:%d\r\n",pDev->dataStore[pDev->gunCurrent].totalVolume);
+                                dbgPrintf(0,"$$$$[Confirm] New Total Amount:%d\r\n",pDev->dataStore[pDev->gunCurrent].totalAmount);
+                                dbgPrintf(0,"$$$$[Confirm] This Volume:%d\r\n",diffV);
+                                dbgPrintf(0,"$$$$[Confirm] This Amount:%d\r\n",diffA);
+                                dbgPrintf(0,"$$$$[Confirm] The timestamp:%d\r\n",pDev->dataStore[pDev->gunCurrent].timeStamp);
+
+                                pDev->preData[pDev->gunCurrent].totalVolume  = pDev->dataStore[pDev->gunCurrent].totalVolume;
+                                pDev->preData[pDev->gunCurrent].totalAmount  =pDev->dataStore[pDev->gunCurrent].totalAmount;
+                                            pDev->preData[pDev->gunCurrent].timeStamp = pDev->dataStore[pDev->gunCurrent].timeStamp;
+                                
+                                memset(&record,0xff,sizeof(TaxOnceTransactionRecord));
+                                record.head.mark= DIRTY;                          // make it dirty after write to flash, read function will make it done
+                             //   record.head.type= 0;                                 // data type
+                                record.content.gunNo =  (pDev->gunCurrent << 8) + pDev->port;    // This gun #
+                                record.content.timeStamp= getLocalTick();
+                                memcpy(record.content.factorySerialNo,pDev->serialID,10);   // FactoryID
+                                getLocalFormatedTime(record.content.timeStamp,&ltm);
+                                memcpy(record.content.date,ltm.date,2);    // Date
+                                memcpy(record.content.hour,ltm.hour,2);    // Hour
+                                memcpy(record.content.minute,ltm.minute,2);    // Minute
+                                sprintf(tt,"%06d",diffV);                   // This volume
+                                memcpy(record.content.volume,tt,6);
+                                sprintf(tt,"%06d",diffA);                 // This amount
+                                memcpy(record.content.amount,tt,6);
+                                memcpy(record.content.price,ptaxOnceResp->price,4);
+                                
+                                
+                                sprintf(ss,"%12d",pDev->dataStore[pDev->gunCurrent].totalVolume);                                
+                                memcpy(record.content.Totalvolume,ss,12);//本次总类加油量存入
+                                
+                                sprintf(ss,"%12d",pDev->dataStore[pDev->gunCurrent].totalAmount);     
+                                memcpy(record.content.Totalamount,ss,12);//本次总类金额存入
+                                
+                                storeTransactionRecord(&record);      
+                                pDev->statistic[pDev->gunCurrent].successCount++;                                
+                                return E_SUCCESS;
+                            }
+                        }
+                        break;
+
+                        default:
+                        {
+                            while(1)
+                            {
+                                dbgPrintf(0,"!!!!TaxControlDevSamplingOnConfirm:  Confirm sub state wrong\r\n");
+                            }   
+                         }
+                         break;
+                     }
+                 }
+                 else
+                 {
+             	    size = sizeof(TaxOnceQueryCmd);
+					error=taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_ONCE,pDev->gunCurrent,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+					error=uartWriteBuffer(pDev->port, pCmdBuf,size);
+					error=uartSendBufferOut(pDev->port);
+					return E_CHECK_CODE;							
+    
+                 }
+		   }
+		   else
+		   {
+                size = sizeof(TaxOnceQueryCmd);
+
+                error=taxControlCmdCreate(TAX_CONTROL_CMD_QUERY_ONCE,pDev->gunCurrent,pCmdBuf,&size,TAX_RESPONSE_RETURN_PLAINTEXT);
+                error=uartWriteBuffer(pDev->port, pCmdBuf,size);
+                error=uartSendBufferOut(pDev->port);
+                return E_MESSAGE_TYPE;							
+		   }					
+
+		}
+	    else
+		{
+			if(pDev->stateCount < TAX_CONTROL_CMD_WAIT_TIMEOUT)
+			{
+					return E_WAITING;
+			}
+			else
+			{
+                     return E_DEVICE_BUSY;
+			}
+		}
+}
+
+/*******************************************************************************************************************************
+Function Name: taxControlDevSamplingOnBusy
+Description:
+      Processing if tax control device is busy(maybe gun is working, or it is doing some inernal work). Experiment shows we the data from device may occur 
+"Gun conflict issue", so the data is not reliable, we need discard it and query again. This funciton need handle 2 types of query, once is "ONCE", the other is
+"TOTAL", they can be distinguished by "curCmd" member of 
+Parameter:
+	pDev:[I], points to device infomation TaxControlDevInfo structure. 
+Return:
+	E_SUCCESS: Received a complete packet from device and discard it.
+	E_CHECK_CODE: Check code error.
+	E_MESSAGE_TYPE: Got unexpected data message
+	E_WAITING: Still need wait for device's response.
+	E_DEVICE_BUSY: Device is busy, can't repsonce within TIMEOUT	
+*******************************************************************************************************************************/
+static errorCode taxControlDevSamplingOnBusy(TaxControlDevInfo *pDev)
+{
+    errorCode error=E_SUCCESS;
+    TaxTotalQueryResp *pTotalResp;
+    TaxOnceQueryResp *pOnceResp;
+    unsigned char pCmdBuf[64];
+    unsigned char pRespBuf[128];
+    unsigned char availBytes=0;
+    unsigned char cc=0x00;
+    unsigned char i;
+    unsigned short expRespSize,nextCmdSize; // 2 options: sizeof(TaxTotalQueryResp) or size of(TaxOnceQueryResp)
+    unsigned char  respCC,respCmd;
+
+    expRespSize  = (pDev->curCmd == TAX_CONTROL_CMD_QUERY_TOTAL)? sizeof(TaxTotalQueryResp):sizeof(TaxOnceQueryResp);
+    nextCmdSize = (pDev->curCmd == TAX_CONTROL_CMD_QUERY_TOTAL)? sizeof(TaxTotalQueryCmd):sizeof(TaxOnceQueryCmd);
+        
+    availBytes = uartGetAvailBufferedDataNum(pDev->port);
+    if(availBytes >= expRespSize)	// Got expected # of bytes, need parse them
+        {
+            taxControlResponseRetriever(pDev->port,pRespBuf,availBytes);
+            if(pDev->curCmd == TAX_CONTROL_CMD_QUERY_TOTAL)
+                {
+                    pTotalResp = (TaxTotalQueryResp *)pRespBuf;
+                    respCC = pTotalResp->cc;
+                    respCmd = pTotalResp->header.cmd;
+                }
+            else
+                {
+                    pOnceResp =  (TaxOnceQueryResp *)pRespBuf;
+                    respCC = pOnceResp->cc;
+                    respCmd = pOnceResp->header.cmd;
+                }
+            
+            if(respCmd == pDev->curCmd)
+                {
+                    for(i=2;i<expRespSize-1;i++)
+                        cc = cc ^ pRespBuf[i];
+                    if(cc == respCC)        // We got a result but maybe wrong,discard this one, change to query state to read again.
+                        { 
+
+                            unsigned char t[13];
+                            long long diffV=0;
+                            long long diffA=0;
+                                            
+                            t[12]=0;
+                            memcpy(t,pTotalResp->volume,12);
+                            pDev->dataStore[pDev->gunCurrent].totalVolume =atoll(t);
+
+                            t[12]=0;
+                            memcpy(t,pTotalResp->amount,12);
+                            pDev->dataStore[pDev->gunCurrent].totalAmount=atoll(t);
+                                
+                            if(pDev->preData[pDev->gunCurrent].totalVolume == 0xffffffffffffffffLL)
+                                {
+                                    pDev->preData[pDev->gunCurrent].totalVolume  = pDev->dataStore[pDev->gunCurrent].totalVolume;
+                                    pDev->preData[pDev->gunCurrent].totalAmount  =pDev->dataStore[pDev->gunCurrent].totalAmount;
+                                }
+                            diffV = pDev->dataStore[pDev->gunCurrent].totalVolume - pDev->preData[pDev->gunCurrent].totalVolume;
+                            diffA = pDev->dataStore[pDev->gunCurrent].totalAmount - pDev->preData[pDev->gunCurrent].totalAmount;                            
+
+                        
+                            error=taxControlCmdCreate(pDev->curCmd,pDev->gunCurrent,pCmdBuf,&nextCmdSize,TAX_RESPONSE_RETURN_PLAINTEXT);
+                            error=uartWriteBuffer(pDev->port, pCmdBuf,nextCmdSize);
+                            error=uartSendBufferOut(pDev->port);
+                            return E_SUCCESS;
+                        }
+                    else
+                        {
+                            if(availBytes > 0)
+                                uartEmptyRcvBuffer(pDev->port);
+                            
+                            error=taxControlCmdCreate(pDev->curCmd,pDev->gunCurrent,pCmdBuf,&nextCmdSize,TAX_RESPONSE_RETURN_PLAINTEXT);
+                            error=uartWriteBuffer(pDev->port, pCmdBuf,nextCmdSize);
+                            error=uartSendBufferOut(pDev->port);
+                           
+                            return E_CHECK_CODE;                            
+                        }
+                }
+            else
+                {
+                    if(availBytes > 0)
+                        uartEmptyRcvBuffer(pDev->port);                    
+                      
+                     error=taxControlCmdCreate(pDev->curCmd,pDev->gunCurrent,pCmdBuf,&nextCmdSize,TAX_RESPONSE_RETURN_PLAINTEXT);
+                     error=uartWriteBuffer(pDev->port, pCmdBuf,nextCmdSize);
+                     error=uartSendBufferOut(pDev->port);
+                    
+                    return E_MESSAGE_TYPE;
+                }
+        }
+    else
+        {
+            if(pDev->stateCount<= TAX_CONTROL_CMD_WAIT_TIMEOUT)
+                {
+                    return E_WAITING;
+                }
+            else
+                {
+                    if(availBytes > 0)
+                        uartEmptyRcvBuffer(pDev->port);
+                      
+                     error=taxControlCmdCreate(pDev->curCmd,pDev->gunCurrent,pCmdBuf,&nextCmdSize,TAX_RESPONSE_RETURN_PLAINTEXT);
+                     error=uartWriteBuffer(pDev->port, pCmdBuf,nextCmdSize);
+                     error=uartSendBufferOut(pDev->port);
+                    
+                    return E_DEVICE_BUSY;
+                }
+        }
+
+    
+    return E_SUCCESS;
+}
+
+/********************************************************************************************************************************
+Function Name: taxControlSamplingOneLoop
+Description:
+	Based on the binding information, sampling each_gun/each_device's transaction information. This functin intends to be called in the taxControlSamplingTask. 
+Input Para:
+	NULL
+Return:
+	NONE;
+*********************************************************************************************************************************/
+static void  taxControlSamplingOneLoop()
+{
+    errorCode res=E_SUCCESS;
+    unsigned char dev=0;
+    static unsigned char count=0;
+	
+    TaxControlDevInfo *pTaxControlDevInfo;
+	extern TaxControlDevMSDFlagManager taxControlDevMSDFlagManager;
+    
+    for(dev=0;dev<TAX_CONTROL_DEVICE_MAX_NUM;dev++)
+	{
+	    pTaxControlDevInfo = (TaxControlDevInfo *)&taxControlDevManager.taxControlDevInfo[dev];
+		if(pTaxControlDevInfo->bind == TAX_CONTROL_DEVICE_BOUND )	// Only process the bound devices.
+		{
+			pTaxControlDevInfo->stateCount++;
+                            
+            switch (pTaxControlDevInfo->sampleState)
+            {
+                case  TAX_CONTROL_SAMPLING_STATE_INIT:
+                   res = taxControlDevSamplingOnInit(pTaxControlDevInfo,ClockStateGet());
+                break;
+
+                case  TAX_CONTROL_SAMPLING_STATE_IDLE:
+                {
+                    
+                    if(taxControlDevMSDFlagManager.MSDFlag[dev]==TAX_CONTROL_DEVICE_MSDSF_UNDONE)
+                    {
+                        pTaxControlDevInfo->curCmd = TAX_CONTROL_CMD_QUERY_MONTH;			// Record the current command
+                       pTaxControlDevInfo->stateCount = 0;
+                    
+                        pTaxControlDevInfo->gunCurrent=0;
+                        // Clear StateCount
+                       pTaxControlDevInfo->sampleState= TAX_CONTROL_SAMPLING_STATE_TAXMONTH_PROCESSING;
+                    }
+                    else
+                    {
+                        		
+                        pTaxControlDevInfo->stateCount = 0;									        // Clear StateCount
+                        pTaxControlDevInfo->sampleState= TAX_CONTROL_SAMPLING_STATE_PROCESSING;		// Change the state to next state.
+                        pTaxControlDevInfo->curCmd = TAX_CONTROL_CMD_QUERY_TOTAL;	
+                    }
+                    res = taxControlDevSamplingOnIdle(pTaxControlDevInfo);
+                    //dbgPrintf(0,"taxControlDevSamplingOnIdle: Port:%d Gun:%d start querying @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,getLocalTick());
+                 }
+                break;
+
+            case TAX_CONTROL_SAMPLING_STATE_PROCESSING:
+            {
+                res = taxControlDevSamplingOnProcessing(pTaxControlDevInfo);
+                switch(res)
+                {
+                    case    E_GUN_INITIALIZE:
+                        {
+                            pTaxControlDevInfo->stateCount = 0;
+                            pTaxControlDevInfo->sampleState = TAX_CONTROL_SAMPLING_STATE_IDLE;
+                            //dbgPrintf(0,"taxControlDevSamplingOnProcessing:Port:%d Gun:%d  Intializing %d  @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,pTaxControlDevInfo->gunRepeatCount,getLocalTick());                                                                    
+                        }
+                    case    E_WAITING:  // Nothing need to do since normal waiting
+                        {
+                            ;//dbgPrintf(0,"taxControlDevSamplingOnProcessing: Port:%d Gun:%d waiting for response @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,getLocalTick());
+                        }
+                    break;
+                    
+                    case    E_AMBIGUITY:
+                        {
+                            pTaxControlDevInfo->curCmd = TAX_CONTROL_CMD_QUERY_ONCE;
+                            pTaxControlDevInfo->stateCount = 0;
+                            pTaxControlDevInfo->sampleState = TAX_CONTROL_SAMPLING_STATE_CONFIRM;
+                            dbgPrintf(0,"taxControlDevSamplingOnProcessing:Port:%d Gun:%d To query Price @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,getLocalTick());
+                        }
+                    break;
+                    
+                    case    E_SUCCESS:
+                        { 
+                            // Switch gun No
+                            //dbgPrintf(0,"taxControlDevSamplingOnProcessing:Port:%d Gun:%d Complete a transaction @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,getLocalTick());
+                            pTaxControlDevInfo->gunCurrent++;
+                            if(pTaxControlDevInfo->gunCurrent >= pTaxControlDevInfo->gunTotal)
+                                pTaxControlDevInfo->gunCurrent = 0;
+                            pTaxControlDevInfo->sampleState = TAX_CONTROL_SAMPLING_STATE_IDLE;
+                        }
+                    break;
+                    case    E_CHECK_CODE:
+                    case    E_MESSAGE_TYPE:
+                        {
+                            pTaxControlDevInfo->stateCount = 0;
+                            pTaxControlDevInfo->curCmd = TAX_CONTROL_CMD_QUERY_TOTAL;
+                            pTaxControlDevInfo->sampleState = TAX_CONTROL_SAMPLING_STATE_IDLE;
+                            dbgPrintf(0,"taxControlDevSamplingOnProcessing: Port:%d Gun:%d Meet CC/MessageType error:%d @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,res,getLocalTick());
+                        }                                                                
+                    break;
+                    
+                    case    E_DEVICE_BUSY:
+                        {
+                            pTaxControlDevInfo->stateCount= 0;
+                            pTaxControlDevInfo->curCmd = TAX_CONTROL_CMD_QUERY_TOTAL;
+                            pTaxControlDevInfo->sampleState= TAX_CONTROL_SAMPLING_STATE_BUSY;
+                            dbgPrintf(0,"taxControlDevSamplingOnProcessing: Port:%d Gun:%d To enter into BUSY state @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,getLocalTick());
+                        }
+                    break;
+
+                    case    E_FAIL:     // something wrong with the data, need restart flow
+                        {
+                            pTaxControlDevInfo->stateCount= 0;
+                            pTaxControlDevInfo->curCmd = TAX_CONTROL_CMD_QUERY_TOTAL;
+                            pTaxControlDevInfo->sampleState= TAX_CONTROL_SAMPLING_STATE_IDLE;                                                                    
+                        }
+                    break;
+                    case    E_WAIT_CONFIRM:
+                        {
+                             pTaxControlDevInfo->stateCount= 0;   
+                        }
+                    break;
+                    default:
+                     {
+                            while(1)
+                             {
+                                    dbgPrintf(0,"!!!!taxControlDevSamplingOnProcessing: Port:%d Gun:%d Return unexpected result :%d @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,res,getLocalTick());
+                             }   
+                            
+                     }   
+                    break;    
+                }
+              }
+                    
+              break;
+
+              case TAX_CONTROL_SAMPLING_STATE_BUSY:
+             {
+                res = taxControlDevSamplingOnBusy(pTaxControlDevInfo);
+                switch(res)
+                 {
+                        case E_WAITING: // Normal waiting, needs nothing to do.
+                            ;//dbgPrintf(0,"taxControlDevSamplingOnBusy: Port:%d Gun:%d waiting for response @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,getLocalTick());
+                        break;
+                        
+                        case E_SUCCESS: // This state doesn't need change command, reset count, return to the original state based on the command,
+                            {
+                                pTaxControlDevInfo->stateCount = 0;
+                                pTaxControlDevInfo->sampleState = (pTaxControlDevInfo->curCmd == TAX_CONTROL_CMD_QUERY_TOTAL)?TAX_CONTROL_SAMPLING_STATE_PROCESSING:TAX_CONTROL_SAMPLING_STATE_CONFIRM;
+                                dbgPrintf(0,"taxControlDevSamplingOnBusy: Port:%d Gun:%d Leave BUSY state @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,getLocalTick());
+                            }
+                        break;
+
+                        // Below error case just need reset count to 0, stay this state until successfully.
+                        case E_MESSAGE_TYPE:
+                        case E_CHECK_CODE:
+                            {
+                                pTaxControlDevInfo->stateCount = 0;
+                                dbgPrintf(0,"taxControlDevSamplingOnBusy:Port:%d Gun:%d  Meest CC/MessgaeType Error: %d @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,res,getLocalTick());
+                            }
+                        break;    
+                        case E_DEVICE_BUSY:
+                            {
+                                pTaxControlDevInfo->stateCount = 0;
+                                dbgPrintf(0,"taxControlDevSamplingOnBusy: Port:%d Gun:%d Still  busy @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,getLocalTick());
+                            }   
+                        break;
+                        default:
+                            {
+                                while(1)
+                                    {
+                                        dbgPrintf(0,"taxControlDevSamplingOnBusy: Port:%d Gun:%d Return unexpected result:%d @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,res,getLocalTick());
+                                    }    
+                            }
+                        break;    
+                   }
+             }
+              break;
+                                
+                case TAX_CONTROL_SAMPLING_STATE_CONFIRM:
+                {
+                res = taxControlDevSamplingOnConfirm(pTaxControlDevInfo);   // based on the 2nd time processing, processing "price" together w/ previous "total"
+                switch(res)
+                    {
+                        case E_WAITING:
+                            {
+                                ;//dbgPrintf(0,"taxControlDevSamplingOnConfirm: Port %d Gun:%d waiting for response@%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,getLocalTick());
+                            }       
+                        case E_SUCCESS:
+                            {
+                                // Switch gun No
+                                pTaxControlDevInfo->gunCurrent++;
+                                if(pTaxControlDevInfo->gunCurrent >= pTaxControlDevInfo->gunTotal)
+                                    pTaxControlDevInfo->gunCurrent = 0;
+                                pTaxControlDevInfo->sampleState = TAX_CONTROL_SAMPLING_STATE_IDLE;
+                                //dbgPrintf(0,"taxControlDevSamplingOnConfirm: Port:%d Gun:%d Complete a transaction @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,getLocalTick());                                                                        
+                            }
+                        break;
+
+                        case E_MESSAGE_TYPE:
+                        case E_CHECK_CODE:
+                            {
+                                pTaxControlDevInfo->stateCount = 0;
+                                dbgPrintf(0,"taxControlDevSamplingOnConfirm:Port:%d Gun:%d Meet checkcode/message type error:%d @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,res,getLocalTick());
+                            }
+                        break;
+
+                        case E_DEVICE_BUSY:
+                            {
+                                pTaxControlDevInfo->stateCount = 0;
+                                pTaxControlDevInfo->sampleState = TAX_CONTROL_SAMPLING_STATE_BUSY;
+                                dbgPrintf(0,"taxControlDevSamplingOnConfirm: Port:%d Gun:%d To enter BUSY state @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,getLocalTick());
+                            }
+                        break;
+
+                        case E_WAIT_CONFIRM:
+                            {
+                                pTaxControlDevInfo->stateCount = 0;
+                                pTaxControlDevInfo->sampleState = TAX_CONTROL_SAMPLING_STATE_CONFIRM;       
+                            }
+                        break;
+                        default:
+                            {
+                                while(1)
+                                {
+                                    dbgPrintf(0,"taxControlDevSamplingOnConfirm: Port:%d Gun:%d Return unexpected result:%d @%x\r\n",pTaxControlDevInfo->port,pTaxControlDevInfo->gunCurrent,res,getLocalTick());
+                                }   
+                                
+                            }
+                        break;    
+                    }
+                }      
+                break;
+                                           
+                case TAX_CONTROL_SAMPLING_STATE_TAXMONTH_PROCESSING:
+                {   
+                    pTaxControlDevInfo->curCmd = TAX_CONTROL_CMD_QUERY_MONTH;			// Record the current command
+                   // pTaxControlDevInfo->stateCount = 0;									        // Clear StateCount
+                    pTaxControlDevInfo->sampleState= TAX_CONTROL_SAMPLING_STATE_TAXMONTH_PROCESSING;	
+                    
+                    res = taxControlDevTaxMonthProcessing(pTaxControlDevInfo);                    
+                   
+                }
+                break;
+                default:
+                break;
+             }
+	     }
+   }
+			
+}
+/*************************************************************************************************************
+Function Name: taxControlSamplingTask
+Description:
+	Scheduled by 1s timer, call taxControlSamplingOneLoop() to sample one gun of each device's transaction info, this function intends
+to be called by the main loop.
+Parameter:
+	None.
+Return:
+	None.
+*************************************************************************************************************/
+void taxControlSamplingTask()
+{
+	taxControlSamplingOneLoop();
+}
+
+
+void TaxMonthSamplingTask()//wawe
+{     
+    extern TaxControlDevMSDFlagManager taxControlDevMSDFlagManager;
+    TaxControlDevInfo *pTaxControlDevInfo;
+    u8 dev;
+    u8 pBuf[20];
+    static u8 hour=200;
+    static u8 cnt=0;
+    struct tm *t;
+    u32 timestick;
+    timestick=getLocalTick()+LOCAL_TIME_ZONE_SECOND_OFFSET;//补8小时时区
+
+    t = localtime((time_t *)&timestick);
+
+    //测试代码
+    if(hour==200)
+    {
+        hour=t->tm_hour;
+      //  min=t->tm_min;
+    }
+
+   //每月更新月累采集标识
+    if(hour!=t->tm_hour)
+	{
+        hour=t->tm_hour;
+       // min=t->tm_min;
+        cnt++;
+        if(cnt==2)
+        {    
+            cnt=0;
+            FlashSectionStruct *pFS = uf_RetrieveFlashSectionInfo(FLASH_SECTION_DEVICE_PARAMETER);
+            for(dev=0;dev<TAX_CONTROL_DEVICE_MAX_NUM;dev++)
+            {
+                taxControlDevMSDFlagManager.MSDFlag[dev]=TAX_CONTROL_DEVICE_MSDSF_UNDONE;
+            }
+            
+            if(t->tm_mon==0)
+                taxControlDevMSDFlagManager.Month=12;
+            else
+                taxControlDevMSDFlagManager.Month=t->tm_mon;
+            
+        
+            memcpy(pBuf,(u8*)&taxControlDevMSDFlagManager,sizeof(taxControlDevMSDFlagManager));
+           
+            uf_EraseSector(pFS->type,pFS->base);     
+            uf_WriteBuffer(pFS->type, pBuf, pFS->base+4, sizeof(taxControlDevMSDFlagManager));
+            uf_WriteBuffer(pFS->type, (u8*)TAX_CONTROL_DEVICE_MSDSAMPLE_FLAG_FLASH_MAGIC, pFS->base,4);
+        
+        }
+	}  
+    
+}
+static errorCode taxControlDevTaxMonthProcessing(TaxControlDevInfo *pDev)
+{
+	errorCode error=E_SUCCESS;
+	TaxMonthlyQueryResp *pMonthResp;
+	TaxMonthDataRecord  MSDRecord;
+	LocalTimeStamp ltm;
+    
+    struct tm *t;
+    u32 timestick;
+	
+	extern TaxControlDevMSDFlagManager taxControlDevMSDFlagManager;
+	unsigned char zero[4]={0};
+	unsigned char pRespBuf[64];
+	unsigned char availBytes=0;
+	unsigned char cc=0;
+	unsigned char i;
+	unsigned char pBuf[20]; 
+    
+	if(pDev == 0)
+		return E_INPUT_PARA;
+   
+	availBytes = uartGetAvailBufferedDataNum(pDev->port);
+	if(availBytes >= sizeof(TaxMonthlyQueryResp))	// Got expected # of bytes, need parse them
+    {
+        pDev->stateCount=0;
+        taxControlResponseRetriever(pDev->port,pRespBuf,availBytes);
+        pMonthResp = (TaxMonthlyQueryResp *)pRespBuf;
+        if(pMonthResp->header.cmd == pDev->curCmd)
+        {
+            for(i=2;i<sizeof(TaxMonthlyQueryResp)-1;i++)
+                cc = cc ^ pRespBuf[i];
+            
+            if(cc == pMonthResp->cc)
+            {
+                if(!memcmp(pDev->MSDdata[pDev->gunCurrent].PreMonthData.year,zero,sizeof(zero)))
+                {
+                    memcpy(pDev->MSDdata[pDev->gunCurrent].PreMonthData.year,pMonthResp->year,sizeof(TaxMonthData));
+                    pDev->MSDdata[pDev->gunCurrent].MSDSameCnt=0;
+                }
+                else
+                {
+                    if(!memcmp(pDev->MSDdata[pDev->gunCurrent].PreMonthData.year,pMonthResp->year,sizeof(TaxMonthData)))
+                        pDev->MSDdata[pDev->gunCurrent].MSDSameCnt++;
+                    else
+                        {
+                            pDev->MSDdata[pDev->gunCurrent].MSDSameCnt=0;
+                            memcpy(pDev->MSDdata[pDev->gunCurrent].PreMonthData.year,pMonthResp->year,sizeof(TaxMonthData));
+                        }
+                }
+                
+            }
+            else{
+                    dbgPrintf(0,"MSD:check code err!\r\n");
+                }
+            if(pDev->MSDdata[pDev->gunCurrent].MSDSameCnt==3)
+            {
+                                            
+                MSDRecord.head.mark= DIRTY;                             // make it dirty after write to flash, read function will make it done
+                MSDRecord.head.type= 0;                                     // data type
+                MSDRecord.content.gunNo =  (pDev->gunCurrent << 8) + pDev->port;    // This gun #
+                MSDRecord.content.timeStamp= getLocalTick();
+                memcpy(MSDRecord.content.factorySerialNo,pDev->serialID,10);   // FactoryID
+                
+                timestick=getLocalTick();
+                timestick+=LOCAL_TIME_ZONE_SECOND_OFFSET;
+                
+                t = localtime((time_t *)&timestick);
+                sprintf(ltm.year,"%4d", t->tm_year+REFERENCE_YEAR_BASE);
+                sprintf(ltm.month,"%2d",t->tm_mon);  //查的是上月累计
+                                       
+                memcpy(MSDRecord.content.year,ltm.year,4);    // Date                                                      
+                memcpy(MSDRecord.content.month,ltm.month,2);    //查的是上月累计
+                                            
+                memcpy(MSDRecord.content.volume,pMonthResp->volume,10);
+                memcpy(MSDRecord.content.amount,pMonthResp->amount,10);
+                
+                
+                dbgPrintf(0,"\r\n**** MSDRecord: Port:%d Gun:%d ",pDev->port,pDev->gunCurrent);
+                SEGGER_RTT_WriteString(0,"Volume:");
+                for(i=0;i<10;i++)
+                    dbgPrintf(0,"%c",pMonthResp->volume[i]);
+                dbgPrintf(0,"  ");
+                SEGGER_RTT_WriteString(0,"Amount:");
+                for(i=0;i<10;i++)
+                    dbgPrintf(0,"%c",pMonthResp->amount[i]);
+                dbgPrintf(0,"\r\n");
+                
+                storeMonthTaxData(&MSDRecord);
+                
+                pDev->MSDdata[pDev->gunCurrent].MSDSameCnt=0;
+                
+                
+                if(pDev->gunTotal==1)
+                {
+                    pDev->sampleState=  TAX_CONTROL_SAMPLING_STATE_IDLE;
+                    pDev->curCmd = TAX_CONTROL_CMD_QUERY_TOTAL;
+                    taxControlDevMSDFlagManager.MSDFlag[pDev->port]=TAX_CONTROL_DEVICE_MSDSF_DONE;
+                    //改写MSDflag
+                    FlashSectionStruct *pFS = uf_RetrieveFlashSectionInfo(FLASH_SECTION_DEVICE_PARAMETER);
+                    // Guoku: Changed flash operation, before write, must call "erase first"
+                                              
+                    memcpy(pBuf,(u8*)&taxControlDevMSDFlagManager,sizeof(taxControlDevMSDFlagManager));                                                                                         
+                    
+                    uf_EraseSector(pFS->type,pFS->base);     
+                    uf_WriteBuffer(pFS->type, pBuf, pFS->base+4, sizeof(taxControlDevMSDFlagManager));
+                    uf_WriteBuffer(pFS->type, (u8*)TAX_CONTROL_DEVICE_MSDSAMPLE_FLAG_FLASH_MAGIC, pFS->base,4);
+                
+                }
+                else
+                {
+                    pDev->gunCurrent++;
+                    if(pDev->gunCurrent<pDev->gunTotal)
+                    {
+                        pDev->MSDdata[pDev->gunCurrent].MSDSameCnt=0;
+                        taxControlDevSamplingOnIdle(pDev);
+                    }
+                    else
+                    {
+                        pDev->sampleState=  TAX_CONTROL_SAMPLING_STATE_IDLE;
+                        pDev->curCmd = TAX_CONTROL_CMD_QUERY_TOTAL;
+                        pDev->gunCurrent=0;
+                        taxControlDevMSDFlagManager.MSDFlag[pDev->port]=TAX_CONTROL_DEVICE_MSDSF_DONE;
+                        //改写MSDflag
+                        FlashSectionStruct *pFS = uf_RetrieveFlashSectionInfo(FLASH_SECTION_DEVICE_PARAMETER);
+                        // Guoku: Changed flash operation, before write, must call "erase first"
+                        memcpy(pBuf,(u8*)&taxControlDevMSDFlagManager,sizeof(taxControlDevMSDFlagManager));                                                                                                                    
+                        uf_EraseSector(pFS->type,pFS->base);     
+                        uf_WriteBuffer(pFS->type, pBuf, pFS->base+4, sizeof(taxControlDevMSDFlagManager));
+                        uf_WriteBuffer(pFS->type, (u8*)TAX_CONTROL_DEVICE_MSDSAMPLE_FLAG_FLASH_MAGIC, pFS->base,4);
+                    
+                    }
+                }
+            }
+            else
+            {
+                taxControlDevSamplingOnIdle(pDev);
+            }
+        }
+    }
+	else
+    {
+        if(pDev->stateCount==3)
+        {
+            taxControlDevSamplingOnIdle(pDev);
+            pDev->stateCount=0;
+        }
+    }
+	return error;
+}
+
+
